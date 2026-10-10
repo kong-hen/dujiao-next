@@ -178,7 +178,7 @@ type IdentityService interface {
 }
 
 type MemberLevelService interface {
-	ResolveMemberPrice(levelID, productID, skuID uint, basePrice decimal.Decimal) (decimal.Decimal, decimal.Decimal)
+	ResolveMemberPrice(levelID, productID, skuID uint, basePrice decimal.Decimal, costPrice ...decimal.Decimal) (decimal.Decimal, decimal.Decimal)
 }
 
 type Settings interface {

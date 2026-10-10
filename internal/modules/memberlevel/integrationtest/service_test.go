@@ -248,3 +248,46 @@ func TestMemberLevelServiceUpdateLevelRejectsActiveSortOrderConflict(t *testing.
 		t.Fatalf("expected active sort_order conflict to be rejected")
 	}
 }
+
+func TestResolveMemberPrice_CostPriceFloor(t *testing.T) {
+	svc, db := newMemberLevelServiceForTest(t)
+
+	// 创建一个 5 折会员等级 (50%)
+	level50 := memberleveldomain.MemberLevel{
+		NameJSON:          jsonmap.JSON{"zh-CN": "五折会员"},
+		Slug:              "half-price",
+		DiscountRate:      money.FromDecimal(decimal.NewFromInt(50)),
+		RechargeThreshold: money.FromDecimal(decimal.Zero),
+		SpendThreshold:    money.FromDecimal(decimal.Zero),
+		IsDefault:         false,
+		SortOrder:         100,
+		IsActive:          true,
+	}
+	if err := db.Create(&level50).Error; err != nil {
+		t.Fatalf("create level failed: %v", err)
+	}
+
+	// 场景 1: 售价 300，成本 200，会员折扣 50% -> 理论 150 击穿成本 200，托底到 200
+	p1, d1 := svc.ResolveMemberPrice(level50.ID, 1, 1, decimal.NewFromInt(300), decimal.NewFromInt(200))
+	if !p1.Equal(decimal.NewFromInt(200)) || !d1.Equal(decimal.NewFromInt(100)) {
+		t.Fatalf("expected price 200 discount 100, got price %s discount %s", p1, d1)
+	}
+
+	// 场景 2: 售价 300，成本 100，会员折扣 50% -> 理论 150 > 100，未击穿成本，正常折后 150
+	p2, d2 := svc.ResolveMemberPrice(level50.ID, 1, 1, decimal.NewFromInt(300), decimal.NewFromInt(100))
+	if !p2.Equal(decimal.NewFromInt(150)) || !d2.Equal(decimal.NewFromInt(150)) {
+		t.Fatalf("expected price 150 discount 150, got price %s discount %s", p2, d2)
+	}
+
+	// 场景 3: 售价 300，未配置成本（成本 0），会员折扣 50% -> 正常折后 150
+	p3, d3 := svc.ResolveMemberPrice(level50.ID, 1, 1, decimal.NewFromInt(300), decimal.Zero)
+	if !p3.Equal(decimal.NewFromInt(150)) || !d3.Equal(decimal.NewFromInt(150)) {
+		t.Fatalf("expected price 150 discount 150, got price %s discount %s", p3, d3)
+	}
+
+	// 场景 4: 售价 100，成本 120（成本高于售价），会员折扣 50% -> 不亏本打折，保持原价 100，优惠 0
+	p4, d4 := svc.ResolveMemberPrice(level50.ID, 1, 1, decimal.NewFromInt(100), decimal.NewFromInt(120))
+	if !p4.Equal(decimal.NewFromInt(100)) || !d4.Equal(decimal.Zero) {
+		t.Fatalf("expected price 100 discount 0, got price %s discount %s", p4, d4)
+	}
+}

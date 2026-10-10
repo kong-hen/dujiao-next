@@ -104,7 +104,7 @@ type SKUMappingRepository interface {
 }
 
 type MemberLevelService interface {
-	ResolveMemberPrice(levelID, productID, skuID uint, basePrice decimal.Decimal) (decimal.Decimal, decimal.Decimal)
+	ResolveMemberPrice(levelID, productID, skuID uint, basePrice decimal.Decimal, costPrice ...decimal.Decimal) (decimal.Decimal, decimal.Decimal)
 	GetByID(id uint) (*memberleveldomain.MemberLevel, error)
 }
 

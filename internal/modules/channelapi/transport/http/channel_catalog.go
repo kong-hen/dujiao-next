@@ -226,7 +226,7 @@ func (h *Handler) GetProducts(c *gin.Context) {
 
 		// 计算会员价
 		if memberLevelID > 0 && h.MemberLevelService != nil {
-			memberPrice, _ := h.MemberLevelService.ResolveMemberPrice(memberLevelID, p.ID, 0, p.PriceAmount.Decimal)
+			memberPrice, _ := h.MemberLevelService.ResolveMemberPrice(memberLevelID, p.ID, 0, p.PriceAmount.Decimal, p.CostPriceAmount.Decimal)
 			if memberPrice.LessThan(p.PriceAmount.Decimal) {
 				item.MemberPriceFrom = money.FromDecimal(memberPrice).String()
 			}
@@ -339,7 +339,11 @@ func (h *Handler) GetProductDetail(c *gin.Context) {
 			StockQuantityHidden: stockDisplay.QuantityHidden,
 		}
 		if memberLevelID > 0 && h.MemberLevelService != nil {
-			memberPrice, _ := h.MemberLevelService.ResolveMemberPrice(memberLevelID, product.ID, sku.ID, sku.PriceAmount.Decimal)
+			skuCost := sku.CostPriceAmount.Decimal
+			if skuCost.IsZero() {
+				skuCost = product.CostPriceAmount.Decimal
+			}
+			memberPrice, _ := h.MemberLevelService.ResolveMemberPrice(memberLevelID, product.ID, sku.ID, sku.PriceAmount.Decimal, skuCost)
 			if memberPrice.LessThan(sku.PriceAmount.Decimal) {
 				si.MemberPrice = money.FromDecimal(memberPrice).String()
 			}
@@ -350,7 +354,7 @@ func (h *Handler) GetProductDetail(c *gin.Context) {
 	// 商品级会员价
 	var memberPriceFrom string
 	if memberLevelID > 0 && h.MemberLevelService != nil {
-		mp, _ := h.MemberLevelService.ResolveMemberPrice(memberLevelID, product.ID, 0, product.PriceAmount.Decimal)
+		mp, _ := h.MemberLevelService.ResolveMemberPrice(memberLevelID, product.ID, 0, product.PriceAmount.Decimal, product.CostPriceAmount.Decimal)
 		if mp.LessThan(product.PriceAmount.Decimal) {
 			memberPriceFrom = money.FromDecimal(mp).String()
 		}
