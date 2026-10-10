@@ -271,7 +271,11 @@ func (h *Handler) toUpstreamProductWithMemberPrice(p productdomain.Product, memb
 			si.OriginalPrice = s.PriceAmount.StringFixed(2)
 			si.PriceAmount = s.AgencyPriceAmount.StringFixed(2) // API 对接成本价格使用代理价
 		} else if memberLevelID > 0 && h.MemberLevels != nil {
-			mp, _ := h.MemberLevels.ResolveMemberPrice(memberLevelID, p.ID, s.ID, s.PriceAmount.Decimal)
+			skuCost := s.CostPriceAmount.Decimal
+			if skuCost.IsZero() {
+				skuCost = p.CostPriceAmount.Decimal
+			}
+			mp, _ := h.MemberLevels.ResolveMemberPrice(memberLevelID, p.ID, s.ID, s.PriceAmount.Decimal, skuCost)
 			if mp.LessThan(s.PriceAmount.Decimal) {
 				si.OriginalPrice = si.PriceAmount
 				si.MemberPrice = money.FromDecimal(mp).StringFixed(2)
@@ -312,7 +316,7 @@ func (h *Handler) toUpstreamProductWithMemberPrice(p productdomain.Product, memb
 		result.OriginalPrice = p.PriceAmount.StringFixed(2)
 		result.PriceAmount = p.AgencyPriceAmount.StringFixed(2)
 	} else if memberLevelID > 0 && h.MemberLevels != nil {
-		mp, _ := h.MemberLevels.ResolveMemberPrice(memberLevelID, p.ID, 0, p.PriceAmount.Decimal)
+		mp, _ := h.MemberLevels.ResolveMemberPrice(memberLevelID, p.ID, 0, p.PriceAmount.Decimal, p.CostPriceAmount.Decimal)
 		if mp.LessThan(p.PriceAmount.Decimal) {
 			result.OriginalPrice = result.PriceAmount
 			result.MemberPrice = money.FromDecimal(mp).StringFixed(2)

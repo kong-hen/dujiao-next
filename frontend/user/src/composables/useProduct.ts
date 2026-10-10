@@ -179,8 +179,21 @@ export function useProductLabels() {
     const levelId = Number(memberLevelId || 0)
     if (base === null || base <= 0 || !Number.isFinite(levelId) || levelId <= 0) return null
 
-    const prices = Array.isArray(product?.member_prices) ? product.member_prices : []
+    // 优先使用后端已预计算并经成本底价托底保护的会员价
     const normalizedSkuId = Number(skuId || 0)
+    if (normalizedSkuId > 0 && Array.isArray(product?.skus)) {
+      const targetSku = product.skus.find((s: any) => Number(s?.id || 0) === normalizedSkuId)
+      const serverMemberPrice = parsePriceAmount(targetSku?.member_price_amount)
+      if (serverMemberPrice !== null && serverMemberPrice > 0 && serverMemberPrice < base) {
+        return centsToAmount(serverMemberPrice)
+      }
+    }
+    const serverProductMemberPrice = parsePriceAmount(product?.member_price_amount)
+    if (serverProductMemberPrice !== null && serverProductMemberPrice > 0 && serverProductMemberPrice < base) {
+      return centsToAmount(serverProductMemberPrice)
+    }
+
+    const prices = Array.isArray(product?.member_prices) ? product.member_prices : []
     const skuPrice = prices.find((p: any) => Number(p?.member_level_id || 0) === levelId && Number(p?.sku_id || 0) === normalizedSkuId)
     const productPrice = prices.find((p: any) => Number(p?.member_level_id || 0) === levelId && Number(p?.sku_id || 0) === 0)
     const overrideCents = parsePriceAmount(skuPrice?.price_amount ?? productPrice?.price_amount)

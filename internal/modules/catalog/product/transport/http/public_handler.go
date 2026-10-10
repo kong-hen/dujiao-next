@@ -49,7 +49,7 @@ type ProductPromotionDecorator interface {
 // MemberLevelPricing 是公开商品会员价装饰端口。
 type MemberLevelPricing interface {
 	GetLevelPricesByProduct(productID uint) ([]memberleveldomain.MemberLevelPrice, error)
-	ResolveMemberPrice(levelID, productID, skuID uint, basePrice decimal.Decimal) (decimal.Decimal, decimal.Decimal)
+	ResolveMemberPrice(levelID, productID, skuID uint, basePrice decimal.Decimal, costPrice ...decimal.Decimal) (decimal.Decimal, decimal.Decimal)
 }
 
 // LocalProductMappingReader 按本地商品 ID 读取上游映射。

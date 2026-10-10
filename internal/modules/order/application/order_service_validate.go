@@ -171,7 +171,11 @@ func (s *OrderService) buildOrderResult(input orderCreateParams) (*orderBuildRes
 		// 3. 在已命中的商品级优惠单价基础上应用会员价。
 		itemMemberDiscount := decimal.Zero
 		if !resellerOrder && userMemberLevelID > 0 && s.memberLevelService != nil {
-			memberUnitPrice, _ := s.memberLevelService.ResolveMemberPrice(userMemberLevelID, product.ID, sku.ID, unitPriceAmount)
+			costPrice := sku.CostPriceAmount.Decimal
+			if costPrice.IsZero() {
+				costPrice = product.CostPriceAmount.Decimal
+			}
+			memberUnitPrice, _ := s.memberLevelService.ResolveMemberPrice(userMemberLevelID, product.ID, sku.ID, unitPriceAmount, costPrice)
 			if memberUnitPrice.LessThan(unitPriceAmount) {
 				itemMemberDiscount = unitPriceAmount.Sub(memberUnitPrice).
 					Mul(decimal.NewFromInt(int64(item.Quantity))).

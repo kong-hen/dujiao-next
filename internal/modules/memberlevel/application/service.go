@@ -126,10 +126,33 @@ func (s *Service) DeleteLevelPrice(id uint) error {
 
 // ResolveMemberPrice 解析会员价
 // 优先级：SKU级覆盖 > 商品级覆盖 > 等级折扣率 * basePrice
-// 返回会员价和会员优惠金额
-func (s *Service) ResolveMemberPrice(levelID, productID, skuID uint, basePrice decimal.Decimal) (memberPrice decimal.Decimal, memberDiscount decimal.Decimal) {
+// 支持成本底价托底：当提供 costPrice 且 > 0 时，最终会员折后价不得低于成本价
+func (s *Service) ResolveMemberPrice(levelID, productID, skuID uint, basePrice decimal.Decimal, costPrice ...decimal.Decimal) (memberPrice decimal.Decimal, memberDiscount decimal.Decimal) {
 	if levelID == 0 {
 		return basePrice, decimal.Zero
+	}
+
+	// 提取成本底价
+	floor := decimal.Zero
+	if len(costPrice) > 0 && costPrice[0].GreaterThan(decimal.Zero) {
+		floor = costPrice[0]
+	}
+
+	// 统一保底结算辅助闭包
+	applyFloor := func(mp decimal.Decimal) (decimal.Decimal, decimal.Decimal) {
+		if mp.GreaterThanOrEqual(basePrice) {
+			return basePrice, decimal.Zero
+		}
+		// 若启用了成本底价，且折后价低于成本价
+		if floor.GreaterThan(decimal.Zero) && mp.LessThan(floor) {
+			if basePrice.GreaterThan(floor) {
+				mp = floor
+			} else {
+				// 若商品原售价本身就未达到或等于成本价，则不产生折扣
+				return basePrice, decimal.Zero
+			}
+		}
+		return mp, basePrice.Sub(mp).Round(2)
 	}
 
 	// 检查会员等级是否启用，停用的等级不享受任何优惠
@@ -143,10 +166,7 @@ func (s *Service) ResolveMemberPrice(levelID, productID, skuID uint, basePrice d
 		skuPrice, err := s.priceRepo.GetByLevelAndProductAndSKU(levelID, productID, skuID)
 		if err == nil && skuPrice != nil && skuPrice.PriceAmount.Decimal.GreaterThan(decimal.Zero) {
 			mp := skuPrice.PriceAmount.Decimal.Round(2)
-			if mp.LessThan(basePrice) {
-				return mp, basePrice.Sub(mp).Round(2)
-			}
-			return basePrice, decimal.Zero
+			return applyFloor(mp)
 		}
 	}
 
@@ -154,10 +174,7 @@ func (s *Service) ResolveMemberPrice(levelID, productID, skuID uint, basePrice d
 	productPrice, err := s.priceRepo.GetByLevelAndProductAndSKU(levelID, productID, 0)
 	if err == nil && productPrice != nil && productPrice.PriceAmount.Decimal.GreaterThan(decimal.Zero) {
 		mp := productPrice.PriceAmount.Decimal.Round(2)
-		if mp.LessThan(basePrice) {
-			return mp, basePrice.Sub(mp).Round(2)
-		}
-		return basePrice, decimal.Zero
+		return applyFloor(mp)
 	}
 
 	// 使用等级折扣率
@@ -166,10 +183,7 @@ func (s *Service) ResolveMemberPrice(levelID, productID, skuID uint, basePrice d
 		return basePrice, decimal.Zero
 	}
 	mp := basePrice.Mul(rate).Div(decimal.NewFromInt(100)).Round(2)
-	if mp.LessThan(basePrice) {
-		return mp, basePrice.Sub(mp).Round(2)
-	}
-	return basePrice, decimal.Zero
+	return applyFloor(mp)
 }
 
 // ResolveMemberPriceForProducts 批量解析会员价（用于商品列表）
