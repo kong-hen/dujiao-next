@@ -184,6 +184,7 @@ export const useUserAuthStore = defineStore('user-auth', () => {
         email?: string
         nickname?: string
         locale?: string
+        member_level_id?: number
         email_verified_at?: string | null
         email_change_mode?: 'bind_only' | 'change_with_old_and_new'
         password_change_mode?: 'set_without_old' | 'change_with_old'

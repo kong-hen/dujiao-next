@@ -34,6 +34,7 @@ type publicProductView struct {
 	PromotionPriceAmount *money.Amount
 	PromotionRules       []productpresenter.PromotionRule
 	MemberPrices         []productpresenter.MemberLevelPrice
+	MemberPriceAmount    *money.Amount
 	PublicSKUs           []publicSKUView
 	ManualStockAvailable int
 	AutoStockAvailable   int64
@@ -108,6 +109,7 @@ func (v *publicProductView) toProductResp() productpresenter.Product {
 		PromotionPriceAmount: v.PromotionPriceAmount,
 		PromotionRules:       v.PromotionRules,
 		MemberPrices:         v.MemberPrices,
+		MemberPriceAmount:    v.MemberPriceAmount,
 	}
 	return resp
 }
@@ -189,6 +191,7 @@ func (h *PublicHandler) decoratePublicProduct(product *productdomain.Product, pr
 	skuViews := make([]publicSKUView, 0, len(item.Product.SKUs))
 	var displayPromotion *promotiondomain.Promotion
 	var displayPromotionPrice *money.Amount
+	var displayMemberPrice *money.Amount
 
 	for _, sku := range item.Product.SKUs {
 		sv := publicSKUView{ProductSKU: sku}
@@ -203,6 +206,9 @@ func (h *PublicHandler) decoratePublicProduct(product *productdomain.Product, pr
 			if memberPrice.LessThan(sku.PriceAmount.Decimal) {
 				mp := money.FromDecimal(memberPrice)
 				sv.MemberPriceAmount = &mp
+				if displaySKUID != 0 && sku.ID == displaySKUID {
+					displayMemberPrice = &mp
+				}
 			}
 		}
 
@@ -234,6 +240,9 @@ func (h *PublicHandler) decoratePublicProduct(product *productdomain.Product, pr
 		item.PromotionName = strings.TrimSpace(displayPromotion.Name)
 		item.PromotionType = strings.TrimSpace(displayPromotion.Type)
 		item.PromotionPriceAmount = displayPromotionPrice
+	}
+	if displayMemberPrice != nil {
+		item.MemberPriceAmount = displayMemberPrice
 	}
 
 	return item.toProductResp(), nil

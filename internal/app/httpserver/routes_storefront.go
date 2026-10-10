@@ -72,6 +72,7 @@ func registerStorefrontRoutes(
 
 	// 公开接口
 	public := storefront.Group("/public")
+	public.Use(middleware.OptionalUserJWTAuthMiddleware(cfg.UserJWT.SecretKey, c.UserStore))
 	{
 		publicconfigtransport.RegisterPublicRoutes(public, publicConfigHandler)
 		producthttp.RegisterPublicRoutes(public, publicCatalogHandler)

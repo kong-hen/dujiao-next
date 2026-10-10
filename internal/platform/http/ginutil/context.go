@@ -54,3 +54,27 @@ func GetContextUintWithKeys(c *gin.Context, key, invalidKey, typeInvalidKey stri
 		return 0, false
 	}
 }
+
+// GetContextMemberLevelID 从上下文读取用户会员等级 ID（若存在）。
+func GetContextMemberLevelID(c *gin.Context) uint {
+	if c == nil {
+		return 0
+	}
+	value, exists := c.Get("user_member_level_id")
+	if !exists {
+		return 0
+	}
+	switch v := value.(type) {
+	case uint:
+		return v
+	case int:
+		if v > 0 {
+			return uint(v)
+		}
+	case float64:
+		if v > 0 {
+			return uint(v)
+		}
+	}
+	return 0
+}

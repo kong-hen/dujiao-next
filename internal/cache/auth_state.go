@@ -18,6 +18,7 @@ const authStateCacheTTL = 10 * time.Minute
 // 字段保持简洁，避免重复查询数据库
 type UserAuthState struct {
 	UserID             uint   `json:"user_id"`
+	MemberLevelID      uint   `json:"member_level_id"`
 	Status             string `json:"status"`
 	TokenVersion       uint64 `json:"token_version"`
 	TokenInvalidBefore int64  `json:"token_invalid_before"`
@@ -48,10 +49,11 @@ func BuildUserAuthState(user *userdomain.User) *UserAuthState {
 		return nil
 	}
 	state := &UserAuthState{
-		UserID:       user.ID,
-		Status:       user.Status,
-		TokenVersion: user.TokenVersion,
-		UpdatedAt:    time.Now().Unix(),
+		UserID:        user.ID,
+		MemberLevelID: user.MemberLevelID,
+		Status:        user.Status,
+		TokenVersion:  user.TokenVersion,
+		UpdatedAt:     time.Now().Unix(),
 	}
 	if user.TokenInvalidBefore != nil {
 		state.TokenInvalidBefore = user.TokenInvalidBefore.Unix()

@@ -7,6 +7,7 @@ import (
 	productcontract "github.com/dujiao-next/internal/modules/catalog/product/contract"
 	productdomain "github.com/dujiao-next/internal/modules/catalog/product/domain"
 
+	memberleveldomain "github.com/dujiao-next/internal/modules/memberlevel/domain"
 	reseller "github.com/dujiao-next/internal/modules/reseller/contract"
 	"github.com/dujiao-next/internal/shared/money"
 	"github.com/shopspring/decimal"
@@ -182,5 +183,65 @@ func TestDecoratePublicProductForTenantInvalidDisplayPricingIsHidden(t *testing.
 				t.Fatalf("expected ErrResellerProductNotListed, got %v", err)
 			}
 		})
+	}
+}
+
+type stubMemberLevelPricing struct {
+	resolveFn func(levelID, productID, skuID uint, basePrice decimal.Decimal, costPrice ...decimal.Decimal) (decimal.Decimal, decimal.Decimal)
+}
+
+func (s stubMemberLevelPricing) GetLevelPricesByProduct(productID uint) ([]memberleveldomain.MemberLevelPrice, error) {
+	return nil, nil
+}
+
+func (s stubMemberLevelPricing) ResolveMemberPrice(levelID, productID, skuID uint, basePrice decimal.Decimal, costPrice ...decimal.Decimal) (decimal.Decimal, decimal.Decimal) {
+	if s.resolveFn != nil {
+		return s.resolveFn(levelID, productID, skuID, basePrice, costPrice...)
+	}
+	return basePrice, decimal.Zero
+}
+
+func TestDecoratePublicProductMemberPriceFlooredByCostPrice(t *testing.T) {
+	// 售价 300，成本 200，5折理论 150，托底后应为 200
+	h := &PublicHandler{
+		memberLevels: stubMemberLevelPricing{
+			resolveFn: func(levelID, productID, skuID uint, basePrice decimal.Decimal, costPrice ...decimal.Decimal) (decimal.Decimal, decimal.Decimal) {
+				discounted := basePrice.Mul(decimal.RequireFromString("0.5"))
+				floor := decimal.Zero
+				if len(costPrice) > 0 {
+					floor = costPrice[0]
+				}
+				if discounted.LessThan(floor) {
+					discounted = floor
+				}
+				return discounted, decimal.Zero
+			},
+		},
+	}
+	product := &productdomain.Product{
+		ID:              1,
+		PriceAmount:     money.FromDecimal(decimal.RequireFromString("300.00")),
+		CostPriceAmount: money.FromDecimal(decimal.RequireFromString("200.00")),
+		SKUs: []productdomain.ProductSKU{
+			{
+				ID:              11,
+				IsActive:        true,
+				PriceAmount:     money.FromDecimal(decimal.RequireFromString("300.00")),
+				CostPriceAmount: money.FromDecimal(decimal.RequireFromString("200.00")),
+			},
+		},
+	}
+
+	item, err := h.decoratePublicProduct(product, nil, 1)
+	if err != nil {
+		t.Fatalf("decoratePublicProduct failed: %v", err)
+	}
+
+	expected := decimal.RequireFromString("200.00")
+	if item.MemberPriceAmount == nil || !item.MemberPriceAmount.Decimal.Equal(expected) {
+		t.Fatalf("expected product MemberPriceAmount %s, got: %+v", expected.String(), item.MemberPriceAmount)
+	}
+	if len(item.SKUs) == 0 || item.SKUs[0].MemberPriceAmount == nil || !item.SKUs[0].MemberPriceAmount.Decimal.Equal(expected) {
+		t.Fatalf("expected sku MemberPriceAmount %s, got: %+v", expected.String(), item.SKUs[0].MemberPriceAmount)
 	}
 }
