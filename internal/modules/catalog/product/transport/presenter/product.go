@@ -51,6 +51,7 @@ type Product struct {
 	PromotionPriceAmount *money.Amount      `json:"promotion_price_amount,omitempty"`
 	PromotionRules       []PromotionRule    `json:"promotion_rules,omitempty"`
 	MemberPrices         []MemberLevelPrice `json:"member_prices,omitempty"`
+	MemberPriceAmount    *money.Amount      `json:"member_price_amount,omitempty"`
 
 	RelatedPosts []RelatedPost `json:"related_posts,omitempty"`
 }

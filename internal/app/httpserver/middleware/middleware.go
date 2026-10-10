@@ -382,6 +382,7 @@ func UserJWTAuthMiddleware(secretKey string, userRepo usercontract.Store) gin.Ha
 			}
 			c.Set("user_id", claims.UserID)
 			c.Set("user_email", claims.Email)
+			c.Set("user_member_level_id", cached.MemberLevelID)
 			c.Next()
 			return
 		}
@@ -409,6 +410,71 @@ func UserJWTAuthMiddleware(secretKey string, userRepo usercontract.Store) gin.Ha
 
 		c.Set("user_id", claims.UserID)
 		c.Set("user_email", claims.Email)
+		c.Set("user_member_level_id", user.MemberLevelID)
+		c.Next()
+	}
+}
+
+// OptionalUserJWTAuthMiddleware 可选用户 JWT 鉴权中间件（不阻断游客访问）
+func OptionalUserJWTAuthMiddleware(secretKey string, userRepo usercontract.Store) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if secretKey == "" || userRepo == nil {
+			c.Next()
+			return
+		}
+		authHeader := c.GetHeader(authHeaderKey)
+		if authHeader == "" {
+			c.Next()
+			return
+		}
+
+		parts := strings.SplitN(authHeader, " ", 2)
+		if !(len(parts) == 2 && parts[0] == authSchemeBearer) {
+			c.Next()
+			return
+		}
+
+		tokenString := parts[1]
+		parser := newHS256JWTParser()
+		claims := &userauthapp.UserJWTClaims{}
+		token, err := parser.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+			return []byte(secretKey), nil
+		})
+		if err != nil || !token.Valid || claims.UserID == 0 {
+			c.Next()
+			return
+		}
+		if !jwttoken.IsAccessType(claims.Typ) {
+			c.Next()
+			return
+		}
+
+		if cached, hit, cacheErr := cache.GetUserAuthState(c.Request.Context(), claims.UserID); cacheErr == nil && hit && cached != nil {
+			if !isActiveUserStatus(cached.Status) || claims.TokenVersion != cached.TokenVersion || !isIssuedAfterInvalidBeforeUnix(claims.IssuedAt, cached.TokenInvalidBefore) {
+				c.Next()
+				return
+			}
+			c.Set("user_id", claims.UserID)
+			c.Set("user_email", claims.Email)
+			c.Set("user_member_level_id", cached.MemberLevelID)
+			c.Next()
+			return
+		}
+
+		user, err := userRepo.GetByID(claims.UserID)
+		if err != nil || user == nil || !isActiveUserStatus(user.Status) {
+			c.Next()
+			return
+		}
+		if claims.TokenVersion != user.TokenVersion || !isIssuedAfterInvalidBefore(claims.IssuedAt, user.TokenInvalidBefore) {
+			c.Next()
+			return
+		}
+		_ = cache.SetUserAuthState(c.Request.Context(), cache.BuildUserAuthState(user))
+
+		c.Set("user_id", claims.UserID)
+		c.Set("user_email", claims.Email)
+		c.Set("user_member_level_id", user.MemberLevelID)
 		c.Next()
 	}
 }

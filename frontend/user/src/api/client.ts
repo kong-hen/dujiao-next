@@ -80,11 +80,9 @@ function createClient(injectAuth: boolean) {
             headers['X-Lang'] = locale
         }
 
-        if (injectAuth) {
-            const token = localStorage.getItem('user_token')
-            if (token && !headers['Authorization']) {
-                headers['Authorization'] = `Bearer ${token}`
-            }
+        const token = localStorage.getItem('user_token')
+        if (token && !headers['Authorization']) {
+            headers['Authorization'] = `Bearer ${token}`
         }
 
         if (body !== undefined && !(body instanceof FormData)) {
