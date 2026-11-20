@@ -443,9 +443,10 @@ const ensureMemberLevels = async () => {
 }
 
 const getMemberPriceForSku = (skuId: number, basePrice: any): number | null => {
+  if (!userAuthStore.isAuthenticated) return null
   const price = resolveMemberPriceAmount(
     props.product, skuId, basePrice, userMemberLevelId.value, currentMemberDiscountRate.value,
-    userAuthStore.isAuthenticated ? userProfileStore.myProductPrices : [],
+    userProfileStore.myProductPrices,
   )
   return price === null ? null : Number(price)
 }

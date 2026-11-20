@@ -219,3 +219,75 @@ func TestUserJWTMiddlewareBindsTokenToTenant(t *testing.T) {
 		t.Fatalf("reseller token on its own site must pass, got %d", got)
 	}
 }
+
+func TestOptionalUserJWTAuthMiddleware(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	repo, user := setupUserMiddlewareTestRepo(t)
+	user.MemberLevelID = 5
+	if err := repo.Update(user); err != nil {
+		t.Fatalf("update user level: %v", err)
+	}
+
+	call := func(authHeader string, tenantRID *uint) (int, uint) {
+		r := gin.New()
+		r.Use(func(c *gin.Context) {
+			if tenantRID != nil {
+				ctx := resellercontract.WithTenantContext(c.Request.Context(), resellercontract.TenantContext{ResellerID: tenantRID})
+				c.Request = c.Request.WithContext(ctx)
+			}
+		}, OptionalUserJWTAuthMiddleware(middlewareTestSecret, repo))
+		var gotLevel uint
+		r.GET("/public/products", func(c *gin.Context) {
+			if v, ok := c.Get("user_member_level_id"); ok {
+				if lv, ok := v.(uint); ok {
+					gotLevel = lv
+				}
+			}
+			c.JSON(http.StatusOK, gin.H{"ok": true})
+		})
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/public/products", nil)
+		if authHeader != "" {
+			req.Header.Set("Authorization", authHeader)
+		}
+		r.ServeHTTP(w, req)
+		return w.Code, gotLevel
+	}
+
+	// 1. 游客无 Token：放行，等级为 0
+	if code, lv := call("", nil); code != http.StatusOK || lv != 0 {
+		t.Fatalf("guest request: want 200/0 got %d/%d", code, lv)
+	}
+	// 2. 无效 Token：静默放行绝不 401，等级为 0
+	if code, lv := call("Bearer invalid.jwt.token", nil); code != http.StatusOK || lv != 0 {
+		t.Fatalf("invalid token: want 200/0 got %d/%d", code, lv)
+	}
+	// 3. 有效主站 Token：注入实时会员等级 5
+	validClaims := userauthapp.UserJWTClaims{
+		UserID:       user.ID,
+		Email:        user.Email,
+		TokenVersion: user.TokenVersion,
+		Typ:          jwttoken.TypeAccess,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+		},
+	}
+	if code, lv := call("Bearer "+signToken(t, validClaims), nil); code != http.StatusOK || lv != 5 {
+		t.Fatalf("valid token: want 200/5 got %d/%d", code, lv)
+	}
+	// 4. 跨站点 Token（分销站 Token 访问主站）：静默忽略不 401，等级为 0
+	crossClaims := validClaims
+	crossClaims.ResellerID = 9
+	if code, lv := call("Bearer "+signToken(t, crossClaims), nil); code != http.StatusOK || lv != 0 {
+		t.Fatalf("cross-tenant token: want 200/0 got %d/%d", code, lv)
+	}
+	// 5. 禁用用户 Token：静默忽略不 401，等级为 0
+	user.Status = "disabled"
+	if err := repo.Update(user); err != nil {
+		t.Fatalf("disable user: %v", err)
+	}
+	if code, lv := call("Bearer "+signToken(t, validClaims), nil); code != http.StatusOK || lv != 0 {
+		t.Fatalf("disabled user token: want 200/0 got %d/%d", code, lv)
+	}
+}

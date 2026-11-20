@@ -101,9 +101,10 @@ export function useProductDetail(options: { onLoaded?: () => void } = {}) {
   }
 
   const getMemberPriceForSku = (skuId: number, basePrice: any): number | null => {
+    if (!userAuthStore.isAuthenticated) return null
     const price = resolveMemberPriceAmount(
       product.value, skuId, basePrice, userMemberLevelId.value, currentMemberDiscountRate.value,
-      userAuthStore.isAuthenticated ? userProfileStore.myProductPrices : [],
+      userProfileStore.myProductPrices,
     )
     return price === null ? null : Number(price)
   }
