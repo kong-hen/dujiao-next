@@ -61,7 +61,7 @@ func TestSyncSingleProductSKUMultipleRowsKeepsSingleActive(t *testing.T) {
 	}
 
 	targetPrice := decimal.RequireFromString("88.88")
-	if err := service.syncSingleProductSKU(repo, nil, productID, "", targetPrice, decimal.Zero, stockPtr(5)); err != nil {
+	if err := service.syncSingleProductSKU(repo, nil, productID, "", targetPrice, decimal.Zero, decimal.Zero, stockPtr(5)); err != nil {
 		t.Fatalf("sync single sku failed: %v", err)
 	}
 
@@ -117,7 +117,7 @@ func TestSyncSingleProductSKURenamesSurvivorToDefault(t *testing.T) {
 	}
 
 	targetPrice := decimal.RequireFromString("12.34")
-	if err := service.syncSingleProductSKU(repo, nil, productID, "", targetPrice, decimal.Zero, stockPtr(7)); err != nil {
+	if err := service.syncSingleProductSKU(repo, nil, productID, "", targetPrice, decimal.Zero, decimal.Zero, stockPtr(7)); err != nil {
 		t.Fatalf("sync single sku failed: %v", err)
 	}
 
@@ -166,7 +166,7 @@ func TestSyncSingleProductSKURejectsRemovingSKUWithCardSecretStock(t *testing.T)
 	}
 
 	cardSecrets := &memoryCardSecretRepo{available: map[uint]int64{withStock.ID: 3}}
-	err := service.syncSingleProductSKU(repo, cardSecrets, productID, constants.FulfillmentTypeAuto, decimal.NewFromInt(10), decimal.Zero, stockPtr(0))
+	err := service.syncSingleProductSKU(repo, cardSecrets, productID, constants.FulfillmentTypeAuto, decimal.NewFromInt(10), decimal.Zero, decimal.Zero, stockPtr(0))
 	if !errors.Is(err, productcontract.ErrProductSKUHasCardSecretStock) {
 		t.Fatalf("expected ErrProductSKUHasCardSecretStock, got %v", err)
 	}
@@ -227,7 +227,7 @@ func TestSyncSingleProductSKUNoActivePrefersDefaultCode(t *testing.T) {
 	}
 
 	targetPrice := decimal.RequireFromString("19.90")
-	if err := service.syncSingleProductSKU(repo, nil, productID, "", targetPrice, decimal.Zero, stockPtr(6)); err != nil {
+	if err := service.syncSingleProductSKU(repo, nil, productID, "", targetPrice, decimal.Zero, decimal.Zero, stockPtr(6)); err != nil {
 		t.Fatalf("sync single sku failed: %v", err)
 	}
 
@@ -364,3 +364,123 @@ func TestUpdateMappedProductPreservesUpstreamManualForm(t *testing.T) {
 }
 
 func stockPtr(value int) *int { return &value }
+
+// 验证单规格同步可正确保存代理价。
+func TestSyncSingleProductSKUAgencyPrice(t *testing.T) {
+	service := NewWriteService(Options{})
+	repo := newSyncSingleSKURepo(t)
+	productID := uint(3001)
+
+	targetPrice := decimal.RequireFromString("100.00")
+	costPrice := decimal.RequireFromString("50.00")
+	agencyPrice := decimal.RequireFromString("70.00")
+	if err := service.syncSingleProductSKU(repo, nil, productID, "", targetPrice, costPrice, agencyPrice, stockPtr(10)); err != nil {
+		t.Fatalf("sync single sku failed: %v", err)
+	}
+
+	skus, err := repo.ListByProduct(productID, false)
+	if err != nil {
+		t.Fatalf("list sku failed: %v", err)
+	}
+	if len(skus) != 1 {
+		t.Fatalf("expected 1 sku, got %d", len(skus))
+	}
+	if !skus[0].AgencyPriceAmount.Equal(agencyPrice) {
+		t.Fatalf("expected agency price %s, got %s", agencyPrice, skus[0].AgencyPriceAmount)
+	}
+}
+
+// 验证多规格代理价标准化、汇总及上下限校验（不得小于 0 或高于售价）。
+func TestNormalizeProductSKUInputsAgencyPrice(t *testing.T) {
+	service := NewWriteService(Options{})
+	inputs := []ProductSKUInput{
+		{
+			SKUCode:           "SKU-A",
+			PriceAmount:       decimal.RequireFromString("100.00"),
+			CostPriceAmount:   decimal.RequireFromString("50.00"),
+			AgencyPriceAmount: decimal.RequireFromString("70.00"),
+			ManualStockTotal:  stockPtr(10),
+		},
+		{
+			SKUCode:           "SKU-B",
+			PriceAmount:       decimal.RequireFromString("120.00"),
+			CostPriceAmount:   decimal.RequireFromString("60.00"),
+			AgencyPriceAmount: decimal.RequireFromString("80.00"),
+			ManualStockTotal:  stockPtr(10),
+		},
+	}
+	normalized, minPrice, _, err := service.normalizeProductSKUInputs(inputs, constants.FulfillmentTypeManual, nil)
+	if err != nil {
+		t.Fatalf("normalize failed: %v", err)
+	}
+	if !minPrice.Equal(decimal.RequireFromString("100.00")) {
+		t.Fatalf("expected min price 100.00, got %s", minPrice)
+	}
+	if got := minActiveCostPrice(normalized); !got.Equal(decimal.RequireFromString("50.00")) {
+		t.Fatalf("expected min cost 50.00, got %s", got)
+	}
+	if got := minActiveAgencyPrice(normalized); !got.Equal(decimal.RequireFromString("70.00")) {
+		t.Fatalf("expected min agency price 70.00, got %s", got)
+	}
+
+	// 代理价低于 0 或高于零售价均应被拒绝。
+	for _, tc := range []struct {
+		name   string
+		agency string
+	}{
+		{name: "negative agency price", agency: "-1.00"},
+		{name: "agency price above retail price", agency: "100.01"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, _, err := service.normalizeProductSKUInputs([]ProductSKUInput{{
+				SKUCode:           "SKU-ERR",
+				PriceAmount:       decimal.RequireFromString("100.00"),
+				AgencyPriceAmount: decimal.RequireFromString(tc.agency),
+				ManualStockTotal:  stockPtr(5),
+			}}, constants.FulfillmentTypeManual, nil)
+			if !errors.Is(err, productcontract.ErrProductPriceInvalid) {
+				t.Fatalf("expected ErrProductPriceInvalid, got %v", err)
+			}
+		})
+	}
+}
+
+// 验证单规格创建和更新时，代理价小于 0 或高于零售价均返回 ErrProductPriceInvalid。
+func TestCreateAndUpdateProductRejectsInvalidAgencyPrice(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		agency string
+	}{
+		{name: "negative", agency: "-0.01"},
+		{name: "above price", agency: "120.00"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := &formProductRepo{product: productdomain.Product{
+				ID: 201, Slug: "single-agency",
+				FulfillmentType:  constants.FulfillmentTypeManual,
+				PurchaseType:     constants.ProductPurchaseMember,
+				StockDisplayMode: constants.ProductStockDisplayStatus,
+				PriceAmount:      money.FromDecimal(decimal.NewFromInt(100)),
+			}}
+			skus := &memorySKURepository{}
+			service := NewWriteService(Options{Products: repo, SKUs: skus, Transactions: formUnitOfWork{
+				repos: TransactionRepositories{Products: repo, SKUs: skus},
+			}})
+
+			input := CreateProductInput{
+				Slug:              "single-agency",
+				PriceAmount:       decimal.NewFromInt(100),
+				AgencyPriceAmount: decimal.RequireFromString(tc.agency),
+				FulfillmentType:   constants.FulfillmentTypeManual,
+				PurchaseType:      constants.ProductPurchaseMember,
+				StockDisplayMode:  constants.ProductStockDisplayStatus,
+			}
+			if _, err := service.Create(input); !errors.Is(err, productcontract.ErrProductPriceInvalid) {
+				t.Fatalf("Create expected ErrProductPriceInvalid, got %v", err)
+			}
+			if _, err := service.Update("201", input); !errors.Is(err, productcontract.ErrProductPriceInvalid) {
+				t.Fatalf("Update expected ErrProductPriceInvalid, got %v", err)
+			}
+		})
+	}
+}

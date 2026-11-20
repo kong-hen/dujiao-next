@@ -285,3 +285,61 @@ func TestResellerProductSettingServiceRequiresActiveProfile(t *testing.T) {
 		t.Fatalf("expected inactive profile, got %v product=%d", err, product.ID)
 	}
 }
+
+// 验证存在代理价时，分销保存与预览按主站价加价与校验上限，低于主站价返回 price_below_master。
+func TestResellerProductSettingAgencyPriceRulesAndPreview(t *testing.T) {
+	db := openResellerProductSettingServiceTestDB(t)
+	user, profile, product, skus := seedResellerProductSettingServiceData(t, db)
+	// 设置主站 100 / 代理 70 / 最大加价 30%
+	if err := db.Model(&profile).Update("max_markup_percent", decimal.NewFromInt(30)).Error; err != nil {
+		t.Fatalf("update profile failed: %v", err)
+	}
+	if err := db.Model(&product).Update("agency_price_amount", decimal.NewFromInt(70)).Error; err != nil {
+		t.Fatalf("update product agency price failed: %v", err)
+	}
+	if err := db.Model(&skus[0]).Update("agency_price_amount", decimal.NewFromInt(70)).Error; err != nil {
+		t.Fatalf("update sku 0 agency price failed: %v", err)
+	}
+	if err := db.Model(&skus[1]).Update("agency_price_amount", decimal.NewFromInt(140)).Error; err != nil {
+		t.Fatalf("update sku 1 agency price failed: %v", err)
+	}
+
+	svc := newResellerProductSettingServiceForTest(db)
+
+	// 1. 百分比加价 20% 与固定加价 10 基于主站价计算，均应合法且生效价分别为 120 / 210
+	detail, err := svc.SaveUserProductSettings(user.ID, product.ID, ResellerProductSettingSaveInput{
+		Settings: []ResellerProductSettingInput{
+			{SKUID: skus[0].ID, IsListed: true, PricingMode: resellerdomain.PricingModeMarkupPercent, MarkupPercent: decimal.NewFromInt(20)},
+			{SKUID: skus[1].ID, IsListed: true, PricingMode: resellerdomain.PricingModeFixedMarkup, FixedMarkupAmount: decimal.NewFromInt(10)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("save markup rules with agency price failed: %v", err)
+	}
+	if got := detail.EffectiveBySKUID[skus[0].ID].StringFixed(2); got != "120.00" {
+		t.Fatalf("sku 0 effective = %s, want 120.00", got)
+	}
+	if got := detail.EffectiveBySKUID[skus[1].ID].StringFixed(2); got != "210.00" {
+		t.Fatalf("sku 1 effective = %s, want 210.00", got)
+	}
+
+	// 2. 预览校验：固定价 90（介于代理价 70 和主站价 100 之间）标记为 price_below_master；
+	// 固定价 110 相对主站价 100 加价 10% <= 30%，标记为有效，且 BasePrice 返回代理进货价 70.00。
+	items, err := svc.PreviewUserProductSettings(user.ID, product.ID, ResellerProductSettingSaveInput{
+		Settings: []ResellerProductSettingInput{
+			{SKUID: skus[0].ID, IsListed: true, PricingMode: resellerdomain.PricingModeFixedPrice, FixedPriceAmount: decimal.NewFromInt(90)},
+			{SKUID: skus[1].ID, IsListed: true, PricingMode: resellerdomain.PricingModeFixedPrice, FixedPriceAmount: decimal.NewFromInt(220)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("preview failed: %v", err)
+	}
+	skuA := findPreviewItem(items, skus[0].ID)
+	if skuA == nil || skuA.Valid || skuA.ErrorCode != "price_below_master" || skuA.BasePrice.StringFixed(2) != "70.00" {
+		t.Fatalf("unexpected sku A preview: %+v", skuA)
+	}
+	skuB := findPreviewItem(items, skus[1].ID)
+	if skuB == nil || !skuB.Valid || skuB.EffectivePrice.StringFixed(2) != "220.00" || skuB.BasePrice.StringFixed(2) != "140.00" {
+		t.Fatalf("unexpected sku B preview: %+v", skuB)
+	}
+}

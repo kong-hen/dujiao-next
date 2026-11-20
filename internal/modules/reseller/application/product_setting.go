@@ -314,22 +314,25 @@ func normalizeProductSettingInput(profile *resellerdomain.Profile, product *prod
 		if sku == nil || !sku.IsActive {
 			return resellerdomain.ProductSetting{}, productcontract.ErrProductSKUInvalid
 		}
-		price, _, err := ResolveUnitAmount(profile, nil, &setting, sku.PriceAmount.Decimal.Round(2))
+		basePrice := sku.ResellerBasePrice()
+		masterPrice := sku.PriceAmount.Decimal.Round(2)
+		price, _, err := ResolveUnitAmount(profile, nil, &setting, masterPrice)
 		if err != nil {
 			return resellerdomain.ProductSetting{}, err
 		}
-		if err := ValidateUnitAmount(profile, sku, sku.PriceAmount.Decimal.Round(2), price); err != nil {
+		if err := ValidateUnitAmount(profile, sku, basePrice, masterPrice, price); err != nil {
 			return resellerdomain.ProductSetting{}, err
 		}
 		return setting, nil
 	}
 	if len(product.SKUs) == 0 {
-		basePrice := product.PriceAmount.Decimal.Round(2)
-		price, _, err := ResolveUnitAmount(profile, &setting, nil, basePrice)
+		basePrice := product.ResellerBasePrice()
+		masterPrice := product.PriceAmount.Decimal.Round(2)
+		price, _, err := ResolveUnitAmount(profile, &setting, nil, masterPrice)
 		if err != nil {
 			return resellerdomain.ProductSetting{}, err
 		}
-		if err := ValidateUnitAmount(profile, nil, basePrice, price); err != nil {
+		if err := ValidateUnitAmount(profile, nil, basePrice, masterPrice, price); err != nil {
 			return resellerdomain.ProductSetting{}, err
 		}
 		costPrice := product.CostPriceAmount.Decimal.Round(2)
@@ -343,11 +346,13 @@ func normalizeProductSettingInput(profile *resellerdomain.Profile, product *prod
 		if !sku.IsActive {
 			continue
 		}
-		price, _, err := ResolveUnitAmount(profile, &setting, nil, sku.PriceAmount.Decimal.Round(2))
+		basePrice := sku.ResellerBasePrice()
+		masterPrice := sku.PriceAmount.Decimal.Round(2)
+		price, _, err := ResolveUnitAmount(profile, &setting, nil, masterPrice)
 		if err != nil {
 			return resellerdomain.ProductSetting{}, err
 		}
-		if err := ValidateUnitAmount(profile, sku, sku.PriceAmount.Decimal.Round(2), price); err != nil {
+		if err := ValidateUnitAmount(profile, sku, basePrice, masterPrice, price); err != nil {
 			return resellerdomain.ProductSetting{}, err
 		}
 	}
@@ -387,7 +392,8 @@ func (s *ProductSettingService) previewSettings(profile *resellerdomain.Profile,
 
 	items := make([]ProductSettingPreviewItem, 0, len(product.SKUs)+1)
 
-	productBase := product.PriceAmount.Decimal.Round(2)
+	productBase := product.ResellerBasePrice()
+	productMaster := product.PriceAmount.Decimal.Round(2)
 	productItem := ProductSettingPreviewItem{
 		SKUID:     0,
 		IsListed:  productSetting == nil || productSetting.IsListed,
@@ -395,10 +401,10 @@ func (s *ProductSettingService) previewSettings(profile *resellerdomain.Profile,
 		Valid:     true,
 	}
 	if productSetting != nil && productSetting.IsListed {
-		price, _, _ := ResolveUnitAmount(profile, productSetting, nil, productBase)
+		price, _, _ := ResolveUnitAmount(profile, productSetting, nil, productMaster)
 		productItem.EffectivePrice = price.Round(2)
 		if len(product.SKUs) == 0 {
-			perr := ValidateUnitAmount(profile, nil, productBase, price)
+			perr := ValidateUnitAmount(profile, nil, productBase, productMaster, price)
 			if perr == nil {
 				cost := product.CostPriceAmount.Decimal.Round(2)
 				if cost.GreaterThan(decimal.Zero) && price.LessThan(cost) {
@@ -419,16 +425,17 @@ func (s *ProductSettingService) previewSettings(profile *resellerdomain.Profile,
 			continue
 		}
 		skuSetting := skuSettings[sku.ID]
-		base := sku.PriceAmount.Decimal.Round(2)
+		base := sku.ResellerBasePrice()
+		master := sku.PriceAmount.Decimal.Round(2)
 		item := ProductSettingPreviewItem{SKUID: sku.ID, IsListed: true, BasePrice: base, Valid: true}
 		if (productSetting != nil && !productSetting.IsListed) || (skuSetting != nil && !skuSetting.IsListed) {
 			item.IsListed = false
 			items = append(items, item)
 			continue
 		}
-		price, _, perr := ResolveUnitAmount(profile, productSetting, skuSetting, base)
+		price, _, perr := ResolveUnitAmount(profile, productSetting, skuSetting, master)
 		if perr == nil {
-			perr = ValidateUnitAmount(profile, sku, base, price)
+			perr = ValidateUnitAmount(profile, sku, base, master, price)
 		}
 		item.EffectivePrice = price.Round(2)
 		item.Valid = perr == nil
@@ -465,10 +472,11 @@ func previewValidateProductRuleAcrossSKUs(profile *resellerdomain.Profile, produ
 		if !sku.IsActive {
 			continue
 		}
-		base := sku.PriceAmount.Decimal.Round(2)
-		price, _, err := ResolveUnitAmount(profile, productSetting, nil, base)
+		base := sku.ResellerBasePrice()
+		master := sku.PriceAmount.Decimal.Round(2)
+		price, _, err := ResolveUnitAmount(profile, productSetting, nil, master)
 		if err == nil {
-			err = ValidateUnitAmount(profile, sku, base, price)
+			err = ValidateUnitAmount(profile, sku, base, master, price)
 		}
 		if err != nil {
 			return false, previewErrorCode(err)
@@ -483,6 +491,8 @@ func previewErrorCode(err error) string {
 		return ""
 	case errors.Is(err, resellercontract.ErrMarkupExceeded):
 		return "markup_exceeded"
+	case errors.Is(err, resellercontract.ErrPriceBelowMasterPrice):
+		return "price_below_master"
 	default:
 		return "price_invalid"
 	}

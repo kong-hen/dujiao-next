@@ -132,6 +132,7 @@ func (v *publicProductView) skuStockState(sv publicSKUView) (string, int64) {
 func isResellerDisplayHiddenError(err error) bool {
 	return errors.Is(err, productcontract.ErrResellerProductNotListed) ||
 		errors.Is(err, reseller.ErrPriceBelowBase) ||
+		errors.Is(err, reseller.ErrPriceBelowMasterPrice) ||
 		errors.Is(err, reseller.ErrMarkupExceeded) ||
 		errors.Is(err, reseller.ErrPricingModeInvalid)
 }

@@ -646,3 +646,190 @@ func TestResellerPricingResolverDisplayHidesInvalidSKUWithoutFailing(t *testing.
 		t.Fatalf("expected display fall back to valid sku 11@130, got %+v", result)
 	}
 }
+
+// 验证商品配置代理价后，分销加价规则与最大加价比例以主站零售价为基数，代理价仅用于进货成本与利润结算。
+func TestResellerPricingResolverAgencyPriceRules(t *testing.T) {
+	tests := []struct {
+		name           string
+		master         string
+		agency         string
+		defaultMarkup  string
+		maxMarkup      string
+		setting        *resellerdomain.ProductSetting
+		wantUnit       string
+		wantBase       string
+		wantProfit     string
+		wantErr        error
+		checkDisplayOK bool
+	}{
+		{
+			name:           "主站100代理70_继承主站价",
+			master:         "100.00",
+			agency:         "70.00",
+			defaultMarkup:  "0.00",
+			maxMarkup:      "30.00",
+			setting:        &resellerdomain.ProductSetting{ID: 1, ResellerID: 10, ProductID: 1, SKUID: 11, IsListed: true, PricingMode: resellerdomain.PricingModeInherit},
+			wantUnit:       "100.00",
+			wantBase:       "70.00",
+			wantProfit:     "30.00",
+			checkDisplayOK: true,
+		},
+		{
+			name:           "主站100代理70_资料默认加价15%",
+			master:         "100.00",
+			agency:         "70.00",
+			defaultMarkup:  "15.00",
+			maxMarkup:      "30.00",
+			setting:        nil,
+			wantUnit:       "115.00",
+			wantBase:       "70.00",
+			wantProfit:     "45.00",
+			checkDisplayOK: true,
+		},
+		{
+			name:           "主站100代理70_百分比加价20%基于主站价不隐藏",
+			master:         "100.00",
+			agency:         "70.00",
+			defaultMarkup:  "0.00",
+			maxMarkup:      "30.00",
+			setting:        &resellerdomain.ProductSetting{ID: 2, ResellerID: 10, ProductID: 1, SKUID: 11, IsListed: true, PricingMode: resellerdomain.PricingModeMarkupPercent, MarkupPercent: money.FromDecimal(decimal.NewFromInt(20))},
+			wantUnit:       "120.00",
+			wantBase:       "70.00",
+			wantProfit:     "50.00",
+			checkDisplayOK: true,
+		},
+		{
+			name:           "主站100代理70_固定加价10基于主站价",
+			master:         "100.00",
+			agency:         "70.00",
+			defaultMarkup:  "0.00",
+			maxMarkup:      "30.00",
+			setting:        &resellerdomain.ProductSetting{ID: 3, ResellerID: 10, ProductID: 1, SKUID: 11, IsListed: true, PricingMode: resellerdomain.PricingModeFixedMarkup, FixedMarkupAmount: money.FromDecimal(decimal.NewFromInt(10))},
+			wantUnit:       "110.00",
+			wantBase:       "70.00",
+			wantProfit:     "40.00",
+			checkDisplayOK: true,
+		},
+		{
+			name:           "主站100代理50_最大加价30%_固定价110通过",
+			master:         "100.00",
+			agency:         "50.00",
+			defaultMarkup:  "0.00",
+			maxMarkup:      "30.00",
+			setting:        &resellerdomain.ProductSetting{ID: 4, ResellerID: 10, ProductID: 1, SKUID: 11, IsListed: true, PricingMode: resellerdomain.PricingModeFixedPrice, FixedPriceAmount: money.FromDecimal(decimal.NewFromInt(110))},
+			wantUnit:       "110.00",
+			wantBase:       "50.00",
+			wantProfit:     "60.00",
+			checkDisplayOK: true,
+		},
+		{
+			name:           "主站100代理50_最大加价30%_固定价130边界通过",
+			master:         "100.00",
+			agency:         "50.00",
+			defaultMarkup:  "0.00",
+			maxMarkup:      "30.00",
+			setting:        &resellerdomain.ProductSetting{ID: 5, ResellerID: 10, ProductID: 1, SKUID: 11, IsListed: true, PricingMode: resellerdomain.PricingModeFixedPrice, FixedPriceAmount: money.FromDecimal(decimal.NewFromInt(130))},
+			wantUnit:       "130.00",
+			wantBase:       "50.00",
+			wantProfit:     "80.00",
+			checkDisplayOK: true,
+		},
+		{
+			name:          "主站100代理50_最大加价30%_固定价131超限被拒",
+			master:        "100.00",
+			agency:        "50.00",
+			defaultMarkup: "0.00",
+			maxMarkup:     "30.00",
+			setting:       &resellerdomain.ProductSetting{ID: 6, ResellerID: 10, ProductID: 1, SKUID: 11, IsListed: true, PricingMode: resellerdomain.PricingModeFixedPrice, FixedPriceAmount: money.FromDecimal(decimal.NewFromInt(131))},
+			wantErr:       resellercontract.ErrMarkupExceeded,
+		},
+		{
+			name:          "主站100代理70_固定价90低于主站价被拒",
+			master:        "100.00",
+			agency:        "70.00",
+			defaultMarkup: "0.00",
+			maxMarkup:     "30.00",
+			setting:       &resellerdomain.ProductSetting{ID: 7, ResellerID: 10, ProductID: 1, SKUID: 11, IsListed: true, PricingMode: resellerdomain.PricingModeFixedPrice, FixedPriceAmount: money.FromDecimal(decimal.NewFromInt(90))},
+			wantErr:       resellercontract.ErrPriceBelowMasterPrice,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			profile := &resellerdomain.Profile{
+				ID:                   10,
+				UserID:               99,
+				Status:               resellerdomain.ProfileStatusActive,
+				DefaultMarkupPercent: money.FromDecimal(decimal.RequireFromString(tc.defaultMarkup)),
+				MaxMarkupPercent:     money.FromDecimal(decimal.RequireFromString(tc.maxMarkup)),
+			}
+			var settings []resellerdomain.ProductSetting
+			if tc.setting != nil {
+				settings = []resellerdomain.ProductSetting{*tc.setting}
+			}
+			repo := &resellerPricingRepoStub{profile: profile, settings: settings}
+			resolver := NewResellerPricingResolver(repo)
+
+			masterDec := decimal.RequireFromString(tc.master)
+			agencyDec := decimal.RequireFromString(tc.agency)
+			result := testOrderBuildResult(struct {
+				productID uint
+				skuID     uint
+				base      decimal.Decimal
+				cost      decimal.Decimal
+				quantity  int
+			}{productID: 1, skuID: 11, base: masterDec, cost: decimal.NewFromInt(40), quantity: 1})
+			result.Plans[0].SKU.AgencyPriceAmount = money.FromDecimal(agencyDec)
+
+			ctx, err := resolver.ApplyToOrderBuildResult(testResellerTenant(), 200, result)
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("expected error %v, got %v", tc.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ApplyToOrderBuildResult failed: %v", err)
+			}
+			if ctx.ResellerAmount.StringFixed(2) != tc.wantUnit {
+				t.Fatalf("reseller amount = %s, want %s", ctx.ResellerAmount.StringFixed(2), tc.wantUnit)
+			}
+			if ctx.BaseAmount.StringFixed(2) != tc.wantBase {
+				t.Fatalf("base amount = %s, want %s", ctx.BaseAmount.StringFixed(2), tc.wantBase)
+			}
+			if ctx.ProfitAmount.StringFixed(2) != tc.wantProfit {
+				t.Fatalf("profit amount = %s, want %s", ctx.ProfitAmount.StringFixed(2), tc.wantProfit)
+			}
+
+			if tc.checkDisplayOK {
+				prod := productdomain.Product{
+					ID:                1,
+					PriceAmount:       money.FromDecimal(masterDec),
+					AgencyPriceAmount: money.FromDecimal(agencyDec),
+					SKUs: []productdomain.ProductSKU{{
+						ID:                11,
+						ProductID:         1,
+						PriceAmount:       money.FromDecimal(masterDec),
+						AgencyPriceAmount: money.FromDecimal(agencyDec),
+						CostPriceAmount:   money.FromDecimal(decimal.NewFromInt(40)),
+						IsActive:          true,
+					}},
+				}
+				batch, err := resolver.LoadDisplayPricingBatch(testResellerTenant(), []productdomain.Product{prod})
+				if err != nil {
+					t.Fatalf("LoadDisplayPricingBatch failed: %v", err)
+				}
+				display, err := resolver.ResolveDisplayPrices(testResellerTenant(), &prod, batch)
+				if err != nil {
+					t.Fatalf("ResolveDisplayPrices failed: %v", err)
+				}
+				if !display.Visible || display.HiddenSKUIDs[11] {
+					t.Fatalf("expected sku 11 visible, got %+v", display)
+				}
+				if display.DisplayPrice.Decimal.StringFixed(2) != tc.wantUnit {
+					t.Fatalf("display price = %s, want %s", display.DisplayPrice.Decimal.StringFixed(2), tc.wantUnit)
+				}
+			}
+		})
+	}
+}

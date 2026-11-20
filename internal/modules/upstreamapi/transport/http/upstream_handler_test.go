@@ -204,6 +204,9 @@ func TestCreateOrderPassesManualFormDataForAllFulfillmentTypes(t *testing.T) {
 			if got := orders.received.ManualFormData["18"]["x_handle"]; got != "fixture_user" {
 				t.Fatalf("manual form data dropped for %s: %#v", kind, orders.received.ManualFormData)
 			}
+			if !orders.received.IsApiOrder {
+				t.Fatalf("expected IsApiOrder to be true for upstream order")
+			}
 		})
 	}
 }
@@ -479,4 +482,104 @@ func TestCreateOrderStopsBeforePaymentWhenRefCreateFails(t *testing.T) {
 	if payments.calls.Load() != 0 || orders.canceled != 1 {
 		t.Fatalf("want 0 payments and 1 canceled order, got %d payments and %d canceled", payments.calls.Load(), orders.canceled)
 	}
+}
+
+// 验证上游目录对代理价、用户专属价及批发阶梯的处理口径与下单一致：
+// - 有代理价的 SKU 忽略会员等级折扣、与用户专属价取更低者，并剔除不生效的批发阶梯；
+// - 无代理价的 SKU 保持原有会员价/专属价与批发阶梯。
+func TestToUpstreamProductWithAgencyPrice(t *testing.T) {
+	baseProduct := productdomain.Product{
+		ID:                18,
+		Slug:              "agency-product",
+		PriceAmount:       money.FromDecimal(decimal.RequireFromString("100.00")),
+		AgencyPriceAmount: money.FromDecimal(decimal.RequireFromString("70.00")),
+		WholesalePrices: productdomain.WholesalePriceTiers{
+			{MinQuantity: 5, UnitPrice: money.FromDecimal(decimal.RequireFromString("80.00"))},
+		},
+		FulfillmentType: constants.FulfillmentTypeManual,
+		SKUs: []productdomain.ProductSKU{
+			{
+				ID:                19,
+				SKUCode:           "SKU-1",
+				PriceAmount:       money.FromDecimal(decimal.RequireFromString("100.00")),
+				AgencyPriceAmount: money.FromDecimal(decimal.RequireFromString("70.00")),
+				IsActive:          true,
+			},
+		},
+	}
+
+	t.Run("agency price overrides level discount and hides wholesale tiers", func(t *testing.T) {
+		handler := &Handler{Dependencies: Dependencies{MemberLevels: catalogPriceLevels{
+			levelPrice: decimal.RequireFromString("60.00"),
+		}}}
+		res := handler.toUpstreamProductWithMemberPrice(baseProduct, memberlevelapp.UserPriceBook{}, 3, nil)
+		if res.PriceAmount != "70.00" || res.OriginalPrice != "100.00" || res.AgencyPrice != "70.00" || res.MemberPrice != "" {
+			t.Fatalf("unexpected product response: %+v", res)
+		}
+		if len(res.WholesalePrices) != 0 {
+			t.Fatalf("expected wholesale_prices cleared when all skus use agency price, got %+v", res.WholesalePrices)
+		}
+		if len(res.SKUs) != 1 || res.SKUs[0].PriceAmount != "70.00" || res.SKUs[0].AgencyPrice != "70.00" || res.SKUs[0].OriginalPrice != "100.00" || res.SKUs[0].MemberPrice != "" {
+			t.Fatalf("unexpected sku response: %+v", res.SKUs)
+		}
+	})
+
+	t.Run("lower user exclusive price beats agency price", func(t *testing.T) {
+		handler := &Handler{Dependencies: Dependencies{MemberLevels: catalogPriceLevels{
+			userPrice: decimal.RequireFromString("60.00"),
+		}}}
+		book, _ := handler.MemberLevels.LoadUserPriceBook(7)
+		res := handler.toUpstreamProductWithMemberPrice(baseProduct, book, 3, nil)
+		if res.PriceAmount != "60.00" || res.MemberPrice != "60.00" || res.AgencyPrice != "70.00" {
+			t.Fatalf("expected cheaper user price 60.00 to win, got %+v", res)
+		}
+		if res.SKUs[0].PriceAmount != "60.00" || res.SKUs[0].MemberPrice != "60.00" || res.SKUs[0].AgencyPrice != "70.00" {
+			t.Fatalf("expected sku cheaper user price 60.00 to win, got %+v", res.SKUs[0])
+		}
+	})
+
+	t.Run("higher user exclusive price loses to agency price", func(t *testing.T) {
+		handler := &Handler{Dependencies: Dependencies{MemberLevels: catalogPriceLevels{
+			userPrice: decimal.RequireFromString("80.00"),
+		}}}
+		book, _ := handler.MemberLevels.LoadUserPriceBook(7)
+		res := handler.toUpstreamProductWithMemberPrice(baseProduct, book, 3, nil)
+		if res.PriceAmount != "70.00" || res.MemberPrice != "" || res.AgencyPrice != "70.00" {
+			t.Fatalf("expected agency price 70.00 to win over higher exclusive 80.00, got %+v", res)
+		}
+		if res.SKUs[0].PriceAmount != "70.00" || res.SKUs[0].MemberPrice != "" {
+			t.Fatalf("expected sku agency price 70.00 to win, got %+v", res.SKUs[0])
+		}
+	})
+
+	t.Run("mixed skus filter agency sku wholesale tiers and preserve non-agency sku pricing", func(t *testing.T) {
+		mixed := productdomain.Product{
+			ID:                18,
+			Slug:              "mixed-agency",
+			PriceAmount:       money.FromDecimal(decimal.RequireFromString("100.00")),
+			AgencyPriceAmount: money.FromDecimal(decimal.Zero),
+			WholesalePrices: productdomain.WholesalePriceTiers{
+				{SKUID: 19, SKUCode: "SKU-A", MinQuantity: 5, UnitPrice: money.FromDecimal(decimal.RequireFromString("80.00"))},
+				{SKUID: 20, SKUCode: "SKU-B", MinQuantity: 5, UnitPrice: money.FromDecimal(decimal.RequireFromString("85.00"))},
+			},
+			FulfillmentType: constants.FulfillmentTypeManual,
+			SKUs: []productdomain.ProductSKU{
+				{ID: 19, SKUCode: "SKU-A", PriceAmount: money.FromDecimal(decimal.RequireFromString("100.00")), AgencyPriceAmount: money.FromDecimal(decimal.RequireFromString("70.00")), IsActive: true},
+				{ID: 20, SKUCode: "SKU-B", PriceAmount: money.FromDecimal(decimal.RequireFromString("100.00")), AgencyPriceAmount: money.FromDecimal(decimal.Zero), IsActive: true},
+			},
+		}
+		handler := &Handler{Dependencies: Dependencies{MemberLevels: catalogPriceLevels{
+			levelPrice: decimal.RequireFromString("90.00"),
+		}}}
+		res := handler.toUpstreamProductWithMemberPrice(mixed, memberlevelapp.UserPriceBook{}, 3, nil)
+		if len(res.WholesalePrices) != 1 || res.WholesalePrices[0].SKUID != 20 {
+			t.Fatalf("expected only non-agency sku 20 wholesale tier kept, got %+v", res.WholesalePrices)
+		}
+		if res.SKUs[0].PriceAmount != "70.00" || res.SKUs[0].AgencyPrice != "70.00" {
+			t.Fatalf("sku 19 want agency 70.00, got %+v", res.SKUs[0])
+		}
+		if res.SKUs[1].PriceAmount != "90.00" || res.SKUs[1].MemberPrice != "90.00" || res.SKUs[1].AgencyPrice != "" {
+			t.Fatalf("sku 20 want level price 90.00, got %+v", res.SKUs[1])
+		}
+	})
 }

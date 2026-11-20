@@ -78,12 +78,13 @@ func (r *ResellerPricingResolver) ApplyToOrderBuildResult(tenant resellercontrac
 			return nil, ErrResellerProductNotListed
 		}
 
-		baseUnit := plan.SKU.PriceAmount.Decimal.Round(2)
-		resellerUnit, rule, err := resolveResellerUnitAmount(profile, productSetting, skuSetting, baseUnit)
+		baseUnit := plan.SKU.ResellerBasePrice()
+		masterUnit := plan.SKU.PriceAmount.Decimal.Round(2)
+		resellerUnit, rule, err := resolveResellerUnitAmount(profile, productSetting, skuSetting, masterUnit)
 		if err != nil {
 			return nil, err
 		}
-		if err := validateResellerUnitAmount(profile, plan.SKU, baseUnit, resellerUnit); err != nil {
+		if err := validateResellerUnitAmount(profile, plan.SKU, baseUnit, masterUnit, resellerUnit); err != nil {
 			return nil, err
 		}
 		quantity := decimal.NewFromInt(int64(plan.Item.Quantity))
@@ -207,9 +208,11 @@ func (r *ResellerPricingResolver) ResolveDisplayPrices(tenant resellercontract.T
 			result.HiddenSKUIDs[sku.ID] = true
 			continue
 		}
-		price, _, err := resolveResellerUnitAmount(batch.Profile, productSetting, skuSetting, sku.PriceAmount.Decimal.Round(2))
+		baseUnit := sku.ResellerBasePrice()
+		masterUnit := sku.PriceAmount.Decimal.Round(2)
+		price, _, err := resolveResellerUnitAmount(batch.Profile, productSetting, skuSetting, masterUnit)
 		if err == nil {
-			err = validateResellerUnitAmount(batch.Profile, &sku, sku.PriceAmount.Decimal.Round(2), price)
+			err = validateResellerUnitAmount(batch.Profile, &sku, baseUnit, masterUnit, price)
 		}
 		if err != nil {
 			// 定价配置可能在保存后因基准价/成本价/上限调整而失效；
@@ -232,7 +235,12 @@ func (r *ResellerPricingResolver) ResolveDisplayPrices(tenant resellercontract.T
 		}
 	}
 	if len(product.SKUs) == 0 {
-		price, _, err := resolveResellerUnitAmount(batch.Profile, productSetting, nil, product.PriceAmount.Decimal.Round(2))
+		baseUnit := product.ResellerBasePrice()
+		masterUnit := product.PriceAmount.Decimal.Round(2)
+		price, _, err := resolveResellerUnitAmount(batch.Profile, productSetting, nil, masterUnit)
+		if err == nil {
+			err = validateResellerUnitAmount(batch.Profile, nil, baseUnit, masterUnit, price)
+		}
 		if err != nil {
 			logger.Warnw("reseller_display_price_product_hidden",
 				"reseller_id", batch.Profile.ID,
@@ -278,12 +286,12 @@ func buildSettingIndexes(settings []resellerdomain.ProductSetting) (map[uint]*re
 	return resellercontract.BuildSettingIndexes(settings)
 }
 
-func resolveResellerUnitAmount(profile *resellerdomain.Profile, productSetting *resellerdomain.ProductSetting, skuSetting *resellerdomain.ProductSetting, baseUnit decimal.Decimal) (decimal.Decimal, resellerapplication.PricingRule, error) {
-	return resellerapplication.ResolveUnitAmount(profile, productSetting, skuSetting, baseUnit)
+func resolveResellerUnitAmount(profile *resellerdomain.Profile, productSetting *resellerdomain.ProductSetting, skuSetting *resellerdomain.ProductSetting, masterUnit decimal.Decimal) (decimal.Decimal, resellerapplication.PricingRule, error) {
+	return resellerapplication.ResolveUnitAmount(profile, productSetting, skuSetting, masterUnit)
 }
 
-func validateResellerUnitAmount(profile *resellerdomain.Profile, sku *productdomain.ProductSKU, baseUnit decimal.Decimal, resellerUnit decimal.Decimal) error {
-	return resellerapplication.ValidateUnitAmount(profile, sku, baseUnit, resellerUnit)
+func validateResellerUnitAmount(profile *resellerdomain.Profile, sku *productdomain.ProductSKU, baseUnit decimal.Decimal, masterUnit decimal.Decimal, resellerUnit decimal.Decimal) error {
+	return resellerapplication.ValidateUnitAmount(profile, sku, baseUnit, masterUnit, resellerUnit)
 }
 
 func collectOrderPlanIDs(plans []childOrderPlan) ([]uint, []uint) {

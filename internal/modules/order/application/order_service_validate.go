@@ -128,23 +128,27 @@ func (s *OrderService) buildOrderResult(input orderCreateParams) (*orderBuildRes
 		}
 
 		productCurrency := currency
+		useAgencyPrice := input.IsApiOrder && sku.AgencyPriceAmount.Decimal.GreaterThan(decimal.Zero)
 		basePrice := sku.PriceAmount.Decimal.Round(2)
+		if useAgencyPrice {
+			basePrice = sku.ResellerBasePrice()
+		}
 
 		// 0. 用户专属一口价：先查出来，但先不生效。要和下面的活动价、批发价、
-		// 会员等级价算出的最终单价比较，只有确实更低时才采纳 —— 否则设了专属价的
-		// 用户会比走普通优惠的用户付得更多。
+		// 会员等级价（或 API 采购代理价）算出的最终单价比较，只有确实更低时才采纳 ——
+		// 否则设了专属价的用户会比走普通优惠/代理价的用户付得更多。
 		var userUnitPrice decimal.Decimal
 		userPriceHit := false
 		if userPriceBook != nil {
 			userUnitPrice, userPriceHit = userPriceBook.Resolve(product.ID, sku.ID, basePrice)
 		}
 
-		// 1. 计算活动价
+		// 1. 计算活动价（命中代理价的 API 采购项跳过促销）
 		priceCarrier := *product
 		priceCarrier.PriceAmount = sku.PriceAmount
 		var promotion *promotiondomain.Promotion
 		promoUnitPriceAmount := basePrice
-		if promotionService != nil {
+		if promotionService != nil && !useAgencyPrice {
 			var promoUnitPrice money.Amount
 			promotion, promoUnitPrice, err = promotionService.ApplyPromotion(&priceCarrier, item.Quantity)
 			if err != nil {
@@ -169,7 +173,7 @@ func (s *OrderService) buildOrderResult(input orderCreateParams) (*orderBuildRes
 		var wholesaleUnitPrice decimal.Decimal
 		wholesaleDiscount := decimal.Zero
 		wholesaleMatched := false
-		if !resellerOrder {
+		if !resellerOrder && !useAgencyPrice {
 			wholesaleUnitPrice, wholesaleDiscount, wholesaleMatched = productdomain.ResolveWholesaleUnitPriceForSKU(product, basePrice, sku.ID, sku.SKUCode, wholesaleMatchQuantity, item.Quantity)
 		}
 		if wholesaleMatched && wholesaleUnitPrice.LessThan(unitPriceAmount) {
@@ -180,9 +184,9 @@ func (s *OrderService) buildOrderResult(input orderCreateParams) (*orderBuildRes
 			wholesaleDiscount = decimal.Zero
 		}
 
-		// 3. 在已命中的商品级优惠单价基础上应用会员价。
+		// 3. 在已命中的商品级优惠单价基础上应用会员价（命中代理价的 API 采购项跳过会员等级折扣）。
 		itemMemberDiscount := decimal.Zero
-		if !resellerOrder && userMemberLevelID > 0 && s.memberLevelService != nil {
+		if !resellerOrder && !useAgencyPrice && userMemberLevelID > 0 && s.memberLevelService != nil {
 			memberUnitPrice, _ := s.memberLevelService.ResolveMemberPrice(userMemberLevelID, product.ID, sku.ID, unitPriceAmount)
 			if memberUnitPrice.LessThan(unitPriceAmount) {
 				itemMemberDiscount = unitPriceAmount.Sub(memberUnitPrice).

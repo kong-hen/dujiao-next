@@ -3,6 +3,7 @@ package upstreamhttp
 import (
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	productdomain "github.com/dujiao-next/internal/modules/catalog/product/domain"
@@ -43,6 +44,7 @@ type upstreamProduct struct {
 	PriceAmount      string                            `json:"price_amount"`
 	OriginalPrice    string                            `json:"original_price,omitempty"`
 	MemberPrice      string                            `json:"member_price,omitempty"`
+	AgencyPrice      string                            `json:"agency_price,omitempty"`
 	WholesalePrices  productdomain.WholesalePriceTiers `json:"wholesale_prices,omitempty"`
 	FulfillmentType  string                            `json:"fulfillment_type"`
 	ManualFormSchema jsonmap.JSON                      `json:"manual_form_schema"`
@@ -60,6 +62,7 @@ type upstreamSKU struct {
 	PriceAmount   string       `json:"price_amount"`
 	OriginalPrice string       `json:"original_price,omitempty"`
 	MemberPrice   string       `json:"member_price,omitempty"`
+	AgencyPrice   string       `json:"agency_price,omitempty"`
 	StockStatus   string       `json:"stock_status"`
 	StockQuantity int          `json:"stock_quantity"`
 	IsActive      bool         `json:"is_active"`
@@ -276,10 +279,15 @@ func (h *Handler) loadUserPriceBook(userID uint) memberlevelapp.UserPriceBook {
 
 func (h *Handler) toUpstreamProductWithMemberPrice(p productdomain.Product, priceBook memberlevelapp.UserPriceBook, memberLevelID uint, fulfillmentTypeMap map[uint]string) upstreamProduct {
 	skus := make([]upstreamSKU, 0, len(p.SKUs))
+	activeCount := 0
+	agencyCount := 0
+	agencySKUIDs := make(map[uint]struct{})
+	agencySKUCodes := make(map[string]struct{})
 	for _, s := range p.SKUs {
 		if !s.IsActive {
 			continue
 		}
+		activeCount++
 		stockStatus, stockQuantity := computeSKUStock(p, s)
 		si := upstreamSKU{
 			ID:            s.ID,
@@ -290,7 +298,22 @@ func (h *Handler) toUpstreamProductWithMemberPrice(p productdomain.Product, pric
 			StockQuantity: stockQuantity,
 			IsActive:      s.IsActive,
 		}
-		if mp, ok := h.resolveCatalogPrice(priceBook, memberLevelID, p.ID, s.ID, s.PriceAmount.Decimal); ok {
+		if s.AgencyPriceAmount.Decimal.GreaterThan(decimal.Zero) {
+			agencyCount++
+			agencySKUIDs[s.ID] = struct{}{}
+			if code := strings.ToLower(strings.TrimSpace(s.SKUCode)); code != "" {
+				agencySKUCodes[code] = struct{}{}
+			}
+			agencyPrice := s.ResellerBasePrice()
+			si.AgencyPrice = agencyPrice.StringFixed(2)
+			si.OriginalPrice = s.PriceAmount.StringFixed(2)
+			si.PriceAmount = si.AgencyPrice
+			// 有代理价的 SKU 跳过会员等级折扣，但若存在更低的用户专属价则按更低价结算
+			if userPrice, ok := priceBook.Resolve(p.ID, s.ID, agencyPrice); ok {
+				si.MemberPrice = money.FromDecimal(userPrice).StringFixed(2)
+				si.PriceAmount = si.MemberPrice
+			}
+		} else if mp, ok := h.resolveCatalogPrice(priceBook, memberLevelID, p.ID, s.ID, s.PriceAmount.Decimal); ok {
 			si.OriginalPrice = si.PriceAmount
 			si.MemberPrice = money.FromDecimal(mp).StringFixed(2)
 			si.PriceAmount = si.MemberPrice // price_amount 是实际售价（专属价或会员价）
@@ -304,6 +327,32 @@ func (h *Handler) toUpstreamProductWithMemberPrice(p productdomain.Product, pric
 		effectiveFulfillmentType = ft
 	}
 
+	// 命中代理价的 SKU 下单时不吃批发阶梯，从目录响应中剔除无效批发价避免下游误按阶梯报价
+	wholesalePrices := p.WholesalePrices
+	if len(wholesalePrices) > 0 {
+		allAgency := (activeCount == 0 && p.AgencyPriceAmount.Decimal.GreaterThan(decimal.Zero)) ||
+			(activeCount > 0 && agencyCount == activeCount)
+		if allAgency {
+			wholesalePrices = nil
+		} else if agencyCount > 0 {
+			filtered := make(productdomain.WholesalePriceTiers, 0, len(wholesalePrices))
+			for _, tier := range wholesalePrices {
+				if tier.SKUID > 0 {
+					if _, blocked := agencySKUIDs[tier.SKUID]; blocked {
+						continue
+					}
+				}
+				if code := strings.ToLower(strings.TrimSpace(tier.SKUCode)); code != "" {
+					if _, blocked := agencySKUCodes[code]; blocked {
+						continue
+					}
+				}
+				filtered = append(filtered, tier)
+			}
+			wholesalePrices = filtered
+		}
+	}
+
 	result := upstreamProduct{
 		ID:               p.ID,
 		Slug:             p.Slug,
@@ -314,7 +363,7 @@ func (h *Handler) toUpstreamProductWithMemberPrice(p productdomain.Product, pric
 		Images:           p.Images,
 		Tags:             p.Tags,
 		PriceAmount:      p.PriceAmount.StringFixed(2),
-		WholesalePrices:  p.WholesalePrices,
+		WholesalePrices:  wholesalePrices,
 		FulfillmentType:  effectiveFulfillmentType,
 		ManualFormSchema: p.ManualFormSchemaJSON,
 		IsActive:         p.IsActive,
@@ -324,7 +373,16 @@ func (h *Handler) toUpstreamProductWithMemberPrice(p productdomain.Product, pric
 		UpdatedAt:        p.UpdatedAt,
 	}
 
-	if mp, ok := h.resolveCatalogPrice(priceBook, memberLevelID, p.ID, 0, p.PriceAmount.Decimal); ok {
+	if p.AgencyPriceAmount.Decimal.GreaterThan(decimal.Zero) {
+		agencyPrice := p.ResellerBasePrice()
+		result.AgencyPrice = agencyPrice.StringFixed(2)
+		result.OriginalPrice = p.PriceAmount.StringFixed(2)
+		result.PriceAmount = result.AgencyPrice
+		if userPrice, ok := priceBook.Resolve(p.ID, 0, agencyPrice); ok {
+			result.MemberPrice = money.FromDecimal(userPrice).StringFixed(2)
+			result.PriceAmount = result.MemberPrice
+		}
+	} else if mp, ok := h.resolveCatalogPrice(priceBook, memberLevelID, p.ID, 0, p.PriceAmount.Decimal); ok {
 		result.OriginalPrice = result.PriceAmount
 		result.MemberPrice = money.FromDecimal(mp).StringFixed(2)
 		result.PriceAmount = result.MemberPrice

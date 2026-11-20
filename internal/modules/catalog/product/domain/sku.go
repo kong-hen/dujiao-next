@@ -5,6 +5,8 @@ import (
 
 	"github.com/dujiao-next/internal/shared/jsonmap"
 	"github.com/dujiao-next/internal/shared/money"
+
+	"github.com/shopspring/decimal"
 )
 
 const (
@@ -20,6 +22,7 @@ type ProductSKU struct {
 	SpecValuesJSON     jsonmap.JSON `gorm:"type:json" json:"spec_values"`                                                               // 规格值（如颜色/版本）
 	PriceAmount        money.Amount `gorm:"type:decimal(20,2);not null;default:0" json:"price_amount"`                                  // SKU价格
 	CostPriceAmount    money.Amount `gorm:"type:decimal(20,2);not null;default:0" json:"cost_price_amount"`                             // 成本价
+	AgencyPriceAmount  money.Amount `gorm:"type:decimal(20,2);not null;default:0" json:"agency_price_amount"`                           // 代理价（0表示未设置）
 	ManualStockTotal   int          `gorm:"not null;default:0" json:"manual_stock_total"`                                               // 手动剩余库存（-1 表示无限库存，>=0 表示当前可售数量）
 	ManualStockLocked  int          `gorm:"not null;default:0" json:"manual_stock_locked"`                                              // 手动库存占用量（待支付）
 	ManualStockSold    int          `gorm:"not null;default:0" json:"manual_stock_sold"`                                                // 手动库存已售量（支付成功后累加）
@@ -40,4 +43,12 @@ type ProductSKU struct {
 // TableName 指定表名
 func (ProductSKU) TableName() string {
 	return "product_skus"
+}
+
+// ResellerBasePrice 返回 SKU 的分销进货底价：已设置代理价（>0）时取代理价，否则回退为主站零售价。
+func (s ProductSKU) ResellerBasePrice() decimal.Decimal {
+	if s.AgencyPriceAmount.Decimal.GreaterThan(decimal.Zero) {
+		return s.AgencyPriceAmount.Decimal.Round(2)
+	}
+	return s.PriceAmount.Decimal.Round(2)
 }
