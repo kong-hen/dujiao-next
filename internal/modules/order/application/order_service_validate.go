@@ -184,10 +184,14 @@ func (s *OrderService) buildOrderResult(input orderCreateParams) (*orderBuildRes
 			wholesaleDiscount = decimal.Zero
 		}
 
-		// 3. 在已命中的商品级优惠单价基础上应用会员价（命中代理价的 API 采购项跳过会员等级折扣）。
+		// 3. 在已命中的商品级优惠单价基础上应用会员价（命中代理价的 API 采购项跳过会员等级折扣；未命中时受成本价托底）。
 		itemMemberDiscount := decimal.Zero
 		if !resellerOrder && !useAgencyPrice && userMemberLevelID > 0 && s.memberLevelService != nil {
-			memberUnitPrice, _ := s.memberLevelService.ResolveMemberPrice(userMemberLevelID, product.ID, sku.ID, unitPriceAmount)
+			costPrice := sku.CostPriceAmount.Decimal
+			if costPrice.LessThanOrEqual(decimal.Zero) {
+				costPrice = product.CostPriceAmount.Decimal
+			}
+			memberUnitPrice, _ := s.memberLevelService.ResolveMemberPrice(userMemberLevelID, product.ID, sku.ID, unitPriceAmount, costPrice)
 			if memberUnitPrice.LessThan(unitPriceAmount) {
 				itemMemberDiscount = unitPriceAmount.Sub(memberUnitPrice).
 					Mul(decimal.NewFromInt(int64(item.Quantity))).

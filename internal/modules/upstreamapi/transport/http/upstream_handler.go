@@ -105,8 +105,8 @@ type SKUMappingRepository interface {
 }
 
 type MemberLevelService interface {
-	ResolveMemberPrice(levelID, productID, skuID uint, basePrice decimal.Decimal) (decimal.Decimal, decimal.Decimal)
-	ResolveCatalogPrice(book memberlevelapp.UserPriceBook, levelID, productID, skuID uint, base decimal.Decimal) (price decimal.Decimal, hit bool, exclusive bool)
+	ResolveMemberPrice(levelID, productID, skuID uint, basePrice decimal.Decimal, costPrice ...decimal.Decimal) (decimal.Decimal, decimal.Decimal)
+	ResolveCatalogPrice(book memberlevelapp.UserPriceBook, levelID, productID, skuID uint, base decimal.Decimal, costPrice ...decimal.Decimal) (price decimal.Decimal, hit bool, exclusive bool)
 	LoadUserPriceBook(userID uint) (memberlevelapp.UserPriceBook, error)
 	GetByID(id uint) (*memberleveldomain.MemberLevel, error)
 }

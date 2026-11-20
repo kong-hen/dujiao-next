@@ -255,11 +255,11 @@ func (h *Handler) resolveEffectiveFulfillmentTypes(products []productdomain.Prod
 	return result
 }
 
-func (h *Handler) resolveCatalogPrice(book memberlevelapp.UserPriceBook, memberLevelID, productID, skuID uint, base decimal.Decimal) (decimal.Decimal, bool) {
+func (h *Handler) resolveCatalogPrice(book memberlevelapp.UserPriceBook, memberLevelID, productID, skuID uint, base decimal.Decimal, costPrice ...decimal.Decimal) (decimal.Decimal, bool) {
 	if h.MemberLevels == nil {
 		return base, false
 	}
-	price, hit, _ := h.MemberLevels.ResolveCatalogPrice(book, memberLevelID, productID, skuID, base)
+	price, hit, _ := h.MemberLevels.ResolveCatalogPrice(book, memberLevelID, productID, skuID, base, costPrice...)
 	return price, hit
 }
 
@@ -313,10 +313,16 @@ func (h *Handler) toUpstreamProductWithMemberPrice(p productdomain.Product, pric
 				si.MemberPrice = money.FromDecimal(userPrice).StringFixed(2)
 				si.PriceAmount = si.MemberPrice
 			}
-		} else if mp, ok := h.resolveCatalogPrice(priceBook, memberLevelID, p.ID, s.ID, s.PriceAmount.Decimal); ok {
-			si.OriginalPrice = si.PriceAmount
-			si.MemberPrice = money.FromDecimal(mp).StringFixed(2)
-			si.PriceAmount = si.MemberPrice // price_amount 是实际售价（专属价或会员价）
+		} else {
+			skuCost := s.CostPriceAmount.Decimal
+			if skuCost.LessThanOrEqual(decimal.Zero) {
+				skuCost = p.CostPriceAmount.Decimal
+			}
+			if mp, ok := h.resolveCatalogPrice(priceBook, memberLevelID, p.ID, s.ID, s.PriceAmount.Decimal, skuCost); ok {
+				si.OriginalPrice = si.PriceAmount
+				si.MemberPrice = money.FromDecimal(mp).StringFixed(2)
+				si.PriceAmount = si.MemberPrice // price_amount 是实际售价（专属价或会员价）
+			}
 		}
 		skus = append(skus, si)
 	}
@@ -382,7 +388,7 @@ func (h *Handler) toUpstreamProductWithMemberPrice(p productdomain.Product, pric
 			result.MemberPrice = money.FromDecimal(userPrice).StringFixed(2)
 			result.PriceAmount = result.MemberPrice
 		}
-	} else if mp, ok := h.resolveCatalogPrice(priceBook, memberLevelID, p.ID, 0, p.PriceAmount.Decimal); ok {
+	} else if mp, ok := h.resolveCatalogPrice(priceBook, memberLevelID, p.ID, 0, p.PriceAmount.Decimal, p.CostPriceAmount.Decimal); ok {
 		result.OriginalPrice = result.PriceAmount
 		result.MemberPrice = money.FromDecimal(mp).StringFixed(2)
 		result.PriceAmount = result.MemberPrice

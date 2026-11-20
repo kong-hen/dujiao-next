@@ -34,6 +34,8 @@ type publicProductView struct {
 	PromotionPriceAmount *money.Amount
 	PromotionRules       []productpresenter.PromotionRule
 	MemberPrices         []productpresenter.MemberLevelPrice
+	MemberPriceAmount    *money.Amount
+	MemberPriceResolved  bool
 	PublicSKUs           []publicSKUView
 	ManualStockAvailable int
 	AutoStockAvailable   int64
@@ -108,6 +110,8 @@ func (v *publicProductView) toProductResp() productpresenter.Product {
 		PromotionPriceAmount: v.PromotionPriceAmount,
 		PromotionRules:       v.PromotionRules,
 		MemberPrices:         v.MemberPrices,
+		MemberPriceAmount:    v.MemberPriceAmount,
+		MemberPriceResolved:  v.MemberPriceResolved,
 	}
 	return resp
 }
@@ -186,22 +190,17 @@ func (h *PublicHandler) decoratePublicProduct(product *productdomain.Product, pr
 		}
 	}
 
-	// 构建 SKU 列表并为每个 active SKU 计算促销价
+	// 构建 SKU 列表并为每个 active SKU 计算促销价与当前用户的会员价（含成本价托底）
 	skuViews := make([]publicSKUView, 0, len(item.Product.SKUs))
 	var displayPromotion *promotiondomain.Promotion
 	var displayPromotionPrice *money.Amount
+	var displayMemberPrice *money.Amount
+	if memberLevelID > 0 && h.memberLevels != nil {
+		item.MemberPriceResolved = true
+	}
 
 	for _, sku := range item.Product.SKUs {
 		sv := publicSKUView{ProductSKU: sku}
-
-		// 计算当前用户的会员价
-		if memberLevelID > 0 && h.memberLevels != nil && sku.IsActive {
-			memberPrice, _ := h.memberLevels.ResolveMemberPrice(memberLevelID, product.ID, sku.ID, sku.PriceAmount.Decimal)
-			if memberPrice.LessThan(sku.PriceAmount.Decimal) {
-				mp := money.FromDecimal(memberPrice)
-				sv.MemberPriceAmount = &mp
-			}
-		}
 
 		if promotions != nil && sku.IsActive {
 			priceCarrier := *product
@@ -219,7 +218,35 @@ func (h *PublicHandler) decoratePublicProduct(product *productdomain.Product, pr
 				}
 			}
 		}
+
+		// 计算当前用户的会员价（有活动价时以活动价为基数，与下单和列表卡片口径一致，并受成本价托底保护）
+		if memberLevelID > 0 && h.memberLevels != nil && sku.IsActive {
+			memberBase := sku.PriceAmount.Decimal
+			if sv.PromotionPriceAmount != nil && sv.PromotionPriceAmount.Decimal.LessThan(memberBase) {
+				memberBase = sv.PromotionPriceAmount.Decimal
+			}
+			costPrice := sku.CostPriceAmount.Decimal
+			if !sku.CostPriceAmount.IsPositive() {
+				costPrice = product.CostPriceAmount.Decimal
+			}
+			memberPrice, _ := h.memberLevels.ResolveMemberPrice(memberLevelID, product.ID, sku.ID, memberBase, costPrice)
+			if memberPrice.LessThan(memberBase) {
+				mp := money.FromDecimal(memberPrice)
+				sv.MemberPriceAmount = &mp
+				if displaySKUID != 0 && sku.ID == displaySKUID {
+					displayMemberPrice = &mp
+				}
+			}
+		}
 		skuViews = append(skuViews, sv)
+	}
+
+	if len(item.Product.SKUs) == 0 && item.MemberPriceResolved {
+		memberPrice, _ := h.memberLevels.ResolveMemberPrice(memberLevelID, product.ID, 0, product.PriceAmount.Decimal, product.CostPriceAmount.Decimal)
+		if memberPrice.LessThan(product.PriceAmount.Decimal) {
+			mp := money.FromDecimal(memberPrice)
+			displayMemberPrice = &mp
+		}
 	}
 
 	item.PublicSKUs = skuViews
@@ -231,6 +258,9 @@ func (h *PublicHandler) decoratePublicProduct(product *productdomain.Product, pr
 		item.PromotionName = strings.TrimSpace(displayPromotion.Name)
 		item.PromotionType = strings.TrimSpace(displayPromotion.Type)
 		item.PromotionPriceAmount = displayPromotionPrice
+	}
+	if displayMemberPrice != nil {
+		item.MemberPriceAmount = displayMemberPrice
 	}
 
 	return item.toProductResp(), nil

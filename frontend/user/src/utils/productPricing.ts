@@ -32,11 +32,7 @@ export const resolveUserPriceCents = (
   return priceCents
 }
 
-/**
- * 会员等级价（SKU 级覆盖价优先于等级折扣率），必须低于 base 才生效。
- * 返回分为单位的整数；未命中返回 null。
- */
-export const resolveMemberLevelPriceCents = (
+const resolveRawMemberLevelPriceCents = (
   product: any,
   skuId: any,
   baseCents: number,
@@ -57,6 +53,77 @@ export const resolveMemberLevelPriceCents = (
   if (!Number.isFinite(rate) || rate <= 0 || rate >= 100) return null
   const memberCents = Math.round((baseCents * rate) / 100)
   return memberCents < baseCents ? memberCents : null
+}
+
+/**
+ * 会员等级价（SKU 级覆盖价优先于等级折扣率），必须低于 base 才生效。
+ * 若后端已按当前登录用户的真实会员等级与商品成本价托底预计算（member_price_resolved === true），
+ * 则优先采用服务端结果，并在命中更低批发价时保留由服务端结果推导出的成本底价保护。
+ * 返回分为单位的整数；未命中返回 null。
+ */
+export const resolveMemberLevelPriceCents = (
+  product: any,
+  skuId: any,
+  baseCents: number,
+  memberLevelId: any,
+  discountRate?: any,
+): number | null => {
+  const normalizedSkuId = normalizeSkuId(skuId)
+  const skus = Array.isArray(product?.skus) ? product.skus : []
+  const targetSku = normalizedSkuId > 0
+    ? skus.find((s: any) => Number(s?.id || 0) === normalizedSkuId)
+    : undefined
+
+  const skuRetailCents = amountToCents(targetSku?.price_amount ?? product?.price_amount)
+  const skuPromoCents = amountToCents(
+    targetSku ? targetSku.promotion_price_amount : product?.promotion_price_amount,
+  )
+  // 后端预计算会员价时的基准价：有活动价时以活动价为准，否则为原价
+  const serverBaseCents = skuRetailCents !== null && skuPromoCents !== null && skuPromoCents > 0 && skuPromoCents < skuRetailCents
+    ? skuPromoCents
+    : skuRetailCents
+  const serverMemberCents = amountToCents(
+    targetSku ? targetSku.member_price_amount : product?.member_price_amount,
+  )
+
+  if (product?.member_price_resolved === true) {
+    // 1. 当前基准价与后端预计算基准价一致（原价或活动价）：完全以服务端成本价托底结果为准
+    if (serverBaseCents === null || baseCents === serverBaseCents) {
+      return serverMemberCents !== null && serverMemberCents > 0 && serverMemberCents < baseCents
+        ? serverMemberCents
+        : null
+    }
+    // 2. 当前基准价低于后端预计算基准价（如详情页切换数量命中批发价）：
+    //    结合服务端结果推导成本底价，避免本地公式把成本价击穿
+    if (baseCents < serverBaseCents) {
+      const rawOnServerBase = resolveRawMemberLevelPriceCents(product, skuId, serverBaseCents, memberLevelId, discountRate)
+      const rawOnCurrentBase = resolveRawMemberLevelPriceCents(product, skuId, baseCents, memberLevelId, discountRate)
+      if (rawOnCurrentBase === null) return null
+      // 后端在更高原价下已拦截掉会员折扣（成本价 >= 原价），则在更低批发价下更不能打折
+      if (serverMemberCents === null) {
+        return rawOnServerBase !== null ? null : rawOnCurrentBase
+      }
+      // 后端预计算价高于纯折扣结果，说明被成本底价托底（serverMemberCents 即为精确成本底价）
+      if (rawOnServerBase !== null && serverMemberCents > rawOnServerBase) {
+        if (rawOnCurrentBase < serverMemberCents) {
+          return baseCents > serverMemberCents ? serverMemberCents : null
+        }
+      }
+      return rawOnCurrentBase
+    }
+  }
+
+  // 兼容未携带 member_price_resolved 但已附带服务端预计算价的场景
+  if (
+    serverMemberCents !== null &&
+    serverMemberCents > 0 &&
+    serverMemberCents < baseCents &&
+    (serverBaseCents === null || baseCents === serverBaseCents)
+  ) {
+    return serverMemberCents
+  }
+
+  return resolveRawMemberLevelPriceCents(product, skuId, baseCents, memberLevelId, discountRate)
 }
 
 /**

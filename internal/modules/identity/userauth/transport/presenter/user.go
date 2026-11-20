@@ -109,15 +109,20 @@ type UserAuthBriefResp struct {
 	ID              uint       `json:"id"`
 	Email           string     `json:"email"`
 	Nickname        string     `json:"nickname"`
+	MemberLevelID   uint       `json:"member_level_id"`
 	EmailVerifiedAt *time.Time `json:"email_verified_at"`
 }
 
 // NewUserAuthBriefResp 从 userdomain.User 构造登录/注册精简响应
 func NewUserAuthBriefResp(user *userdomain.User) UserAuthBriefResp {
+	if user == nil {
+		return UserAuthBriefResp{}
+	}
 	return UserAuthBriefResp{
 		ID:              user.ID,
 		Email:           user.Email,
 		Nickname:        user.DisplayName,
+		MemberLevelID:   user.MemberLevelID,
 		EmailVerifiedAt: user.EmailVerifiedAt,
 	}
 }

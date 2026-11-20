@@ -315,9 +315,19 @@ func (s priceTestIdentity) ResolveTelegramChannelIdentity(in channeltransport.Te
 
 type priceTestLevels struct{}
 
-func (priceTestLevels) ResolveMemberPrice(levelID, _, _ uint, base decimal.Decimal) (decimal.Decimal, decimal.Decimal) {
+func (priceTestLevels) ResolveMemberPrice(levelID, _, _ uint, base decimal.Decimal, costPrice ...decimal.Decimal) (decimal.Decimal, decimal.Decimal) {
 	if levelID == 3 {
-		return decimal.NewFromInt(90), base.Sub(decimal.NewFromInt(90))
+		mp := decimal.NewFromInt(90)
+		if len(costPrice) > 0 && costPrice[0].GreaterThan(decimal.Zero) && mp.LessThan(costPrice[0]) {
+			if base.GreaterThan(costPrice[0]) {
+				mp = costPrice[0]
+			} else {
+				return base, decimal.Zero
+			}
+		}
+		if mp.LessThan(base) {
+			return mp, base.Sub(mp)
+		}
 	}
 	return base, decimal.Zero
 }
@@ -338,11 +348,10 @@ func (priceTestLevels) LoadUserPriceBook(userID uint) (memberlevelapp.UserPriceB
 }
 
 // ResolveCatalogPrice 复刻生产的取价规则：专属价与会员价取更低者，专属价必须严格更低。
-func (l priceTestLevels) ResolveCatalogPrice(book memberlevelapp.UserPriceBook, levelID, productID, skuID uint, base decimal.Decimal) (decimal.Decimal, bool, bool) {
+func (l priceTestLevels) ResolveCatalogPrice(book memberlevelapp.UserPriceBook, levelID, productID, skuID uint, base decimal.Decimal, costPrice ...decimal.Decimal) (decimal.Decimal, bool, bool) {
 	best, hit, exclusive := base, false, false
 	if levelID == 3 {
-		levelPrice := decimal.NewFromInt(90)
-		if levelPrice.LessThan(best) {
+		if levelPrice, _ := l.ResolveMemberPrice(levelID, productID, skuID, base, costPrice...); levelPrice.LessThan(best) {
 			best, hit = levelPrice, true
 		}
 	}

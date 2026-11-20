@@ -254,9 +254,17 @@ type catalogPriceLevels struct {
 	levelPrice decimal.Decimal
 }
 
-func (l catalogPriceLevels) ResolveMemberPrice(levelID, _, _ uint, base decimal.Decimal) (decimal.Decimal, decimal.Decimal) {
+func (l catalogPriceLevels) ResolveMemberPrice(levelID, _, _ uint, base decimal.Decimal, costPrice ...decimal.Decimal) (decimal.Decimal, decimal.Decimal) {
 	if levelID == 3 && l.levelPrice.LessThan(base) {
-		return l.levelPrice, base.Sub(l.levelPrice)
+		mp := l.levelPrice
+		if len(costPrice) > 0 && costPrice[0].GreaterThan(decimal.Zero) && mp.LessThan(costPrice[0]) {
+			if base.GreaterThan(costPrice[0]) {
+				mp = costPrice[0]
+			} else {
+				return base, decimal.Zero
+			}
+		}
+		return mp, base.Sub(mp)
 	}
 	return base, decimal.Zero
 }
@@ -270,11 +278,13 @@ func (l catalogPriceLevels) LoadUserPriceBook(userID uint) (memberlevelapp.UserP
 	return book, nil
 }
 
-// ResolveCatalogPrice 复刻生产规则：专属价与等级价取更低者，专属价必须严格更低。
-func (l catalogPriceLevels) ResolveCatalogPrice(book memberlevelapp.UserPriceBook, levelID, productID, skuID uint, base decimal.Decimal) (decimal.Decimal, bool, bool) {
+// ResolveCatalogPrice 复刻生产规则：专属价与等级价取更低者，等级价受成本价托底，专属价必须严格更低。
+func (l catalogPriceLevels) ResolveCatalogPrice(book memberlevelapp.UserPriceBook, levelID, productID, skuID uint, base decimal.Decimal, costPrice ...decimal.Decimal) (decimal.Decimal, bool, bool) {
 	best, hit, exclusive := base, false, false
-	if levelID == 3 && l.levelPrice.LessThan(best) {
-		best, hit = l.levelPrice, true
+	if levelID == 3 {
+		if mp, _ := l.ResolveMemberPrice(levelID, productID, skuID, base, costPrice...); mp.LessThan(best) {
+			best, hit = mp, true
+		}
 	}
 	if price, ok := book.Resolve(productID, skuID, base); ok && price.LessThan(best) {
 		best, hit, exclusive = price, true, true
@@ -580,6 +590,46 @@ func TestToUpstreamProductWithAgencyPrice(t *testing.T) {
 		}
 		if res.SKUs[1].PriceAmount != "90.00" || res.SKUs[1].MemberPrice != "90.00" || res.SKUs[1].AgencyPrice != "" {
 			t.Fatalf("sku 20 want level price 90.00, got %+v", res.SKUs[1])
+		}
+	})
+
+	t.Run("non-agency sku member price respects cost floor while user exclusive price does not", func(t *testing.T) {
+		noAgency := productdomain.Product{
+			ID:              18,
+			Slug:            "cost-floor-product",
+			PriceAmount:     money.FromDecimal(decimal.RequireFromString("300.00")),
+			CostPriceAmount: money.FromDecimal(decimal.RequireFromString("200.00")),
+			FulfillmentType: constants.FulfillmentTypeManual,
+			SKUs: []productdomain.ProductSKU{
+				{
+					ID:              19,
+					SKUCode:         "SKU-FLOOR",
+					PriceAmount:     money.FromDecimal(decimal.RequireFromString("300.00")),
+					CostPriceAmount: money.FromDecimal(decimal.RequireFromString("200.00")),
+					IsActive:        true,
+				},
+			},
+		}
+		handler := &Handler{Dependencies: Dependencies{MemberLevels: catalogPriceLevels{
+			levelPrice: decimal.RequireFromString("150.00"),
+			userPrice:  decimal.RequireFromString("180.00"),
+		}}}
+		// 无专属价：等级价 150 被成本 200 托底至 200.00
+		resFloor := handler.toUpstreamProductWithMemberPrice(noAgency, memberlevelapp.UserPriceBook{}, 3, nil)
+		if resFloor.PriceAmount != "200.00" || resFloor.MemberPrice != "200.00" {
+			t.Fatalf("expected product member price floored to 200.00, got %+v", resFloor)
+		}
+		if resFloor.SKUs[0].PriceAmount != "200.00" || resFloor.SKUs[0].MemberPrice != "200.00" {
+			t.Fatalf("expected sku member price floored to 200.00, got %+v", resFloor.SKUs[0])
+		}
+		// 有用户专属一口价 180：不受成本价托底限制，比托底后的 200 更低，生效 180.00
+		book, _ := handler.MemberLevels.LoadUserPriceBook(7)
+		resExclusive := handler.toUpstreamProductWithMemberPrice(noAgency, book, 3, nil)
+		if resExclusive.PriceAmount != "180.00" || resExclusive.MemberPrice != "180.00" {
+			t.Fatalf("expected product user exclusive price 180.00 not floored by cost, got %+v", resExclusive)
+		}
+		if resExclusive.SKUs[0].PriceAmount != "180.00" || resExclusive.SKUs[0].MemberPrice != "180.00" {
+			t.Fatalf("expected sku user exclusive price 180.00 not floored by cost, got %+v", resExclusive.SKUs[0])
 		}
 	})
 }

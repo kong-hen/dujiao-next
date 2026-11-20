@@ -7,6 +7,8 @@ import (
 	productcontract "github.com/dujiao-next/internal/modules/catalog/product/contract"
 	productdomain "github.com/dujiao-next/internal/modules/catalog/product/domain"
 
+	memberleveldomain "github.com/dujiao-next/internal/modules/memberlevel/domain"
+	promotiondomain "github.com/dujiao-next/internal/modules/promotion/domain"
 	reseller "github.com/dujiao-next/internal/modules/reseller/contract"
 	"github.com/dujiao-next/internal/shared/money"
 	"github.com/shopspring/decimal"
@@ -183,4 +185,139 @@ func TestDecoratePublicProductForTenantInvalidDisplayPricingIsHidden(t *testing.
 			}
 		})
 	}
+}
+
+type stubMemberLevelPricing struct {
+	resolveFn func(levelID, productID, skuID uint, basePrice decimal.Decimal, costPrice ...decimal.Decimal) (decimal.Decimal, decimal.Decimal)
+}
+
+func (s stubMemberLevelPricing) GetLevelPricesByProduct(productID uint) ([]memberleveldomain.MemberLevelPrice, error) {
+	return nil, nil
+}
+
+func (s stubMemberLevelPricing) ResolveMemberPrice(levelID, productID, skuID uint, basePrice decimal.Decimal, costPrice ...decimal.Decimal) (decimal.Decimal, decimal.Decimal) {
+	if s.resolveFn != nil {
+		return s.resolveFn(levelID, productID, skuID, basePrice, costPrice...)
+	}
+	return basePrice, decimal.Zero
+}
+
+type stubPromotionDecorator struct {
+	promoPrice decimal.Decimal
+}
+
+func (s stubPromotionDecorator) GetProductPromotions(productID uint) ([]promotiondomain.Promotion, error) {
+	return nil, nil
+}
+
+func (s stubPromotionDecorator) ApplyPromotion(product *productdomain.Product, quantity int) (*promotiondomain.Promotion, money.Amount, error) {
+	if s.promoPrice.GreaterThan(decimal.Zero) && s.promoPrice.LessThan(product.PriceAmount.Decimal) {
+		return &promotiondomain.Promotion{ID: 1, Name: "促销", Type: "fixed"}, money.FromDecimal(s.promoPrice), nil
+	}
+	return nil, product.PriceAmount, nil
+}
+
+func TestDecoratePublicProductMemberPriceFlooredByCostPrice(t *testing.T) {
+	h := &PublicHandler{
+		memberLevels: stubMemberLevelPricing{
+			resolveFn: func(levelID, productID, skuID uint, basePrice decimal.Decimal, costPrice ...decimal.Decimal) (decimal.Decimal, decimal.Decimal) {
+				discounted := basePrice.Mul(decimal.RequireFromString("0.5")).Round(2)
+				floor := decimal.Zero
+				if len(costPrice) > 0 {
+					floor = costPrice[0].Round(2)
+				}
+				if floor.GreaterThan(decimal.Zero) && discounted.LessThan(floor) {
+					if basePrice.GreaterThan(floor) {
+						discounted = floor
+					} else {
+						return basePrice, decimal.Zero
+					}
+				}
+				return discounted, basePrice.Sub(discounted).Round(2)
+			},
+		},
+	}
+
+	t.Run("cost price floors member price", func(t *testing.T) {
+		// 售价 300，成本 200，5折理论 150，托底后应为 200
+		product := &productdomain.Product{
+			ID:              1,
+			PriceAmount:     money.FromDecimal(decimal.RequireFromString("300.00")),
+			CostPriceAmount: money.FromDecimal(decimal.RequireFromString("200.00")),
+			SKUs: []productdomain.ProductSKU{
+				{
+					ID:              11,
+					IsActive:        true,
+					PriceAmount:     money.FromDecimal(decimal.RequireFromString("300.00")),
+					CostPriceAmount: money.FromDecimal(decimal.RequireFromString("200.00")),
+				},
+			},
+		}
+
+		item, err := h.decoratePublicProduct(product, nil, 1)
+		if err != nil {
+			t.Fatalf("decoratePublicProduct failed: %v", err)
+		}
+		if !item.MemberPriceResolved {
+			t.Fatalf("expected MemberPriceResolved=true")
+		}
+		expected := decimal.RequireFromString("200.00")
+		if item.MemberPriceAmount == nil || !item.MemberPriceAmount.Decimal.Equal(expected) {
+			t.Fatalf("expected product MemberPriceAmount %s, got: %+v", expected.String(), item.MemberPriceAmount)
+		}
+		if len(item.SKUs) == 0 || item.SKUs[0].MemberPriceAmount == nil || !item.SKUs[0].MemberPriceAmount.Decimal.Equal(expected) {
+			t.Fatalf("expected sku MemberPriceAmount %s, got: %+v", expected.String(), item.SKUs[0].MemberPriceAmount)
+		}
+	})
+
+	t.Run("cost at or above price suppresses discount and marks resolved", func(t *testing.T) {
+		product := &productdomain.Product{
+			ID:              2,
+			PriceAmount:     money.FromDecimal(decimal.RequireFromString("100.00")),
+			CostPriceAmount: money.FromDecimal(decimal.RequireFromString("120.00")),
+			SKUs: []productdomain.ProductSKU{
+				{
+					ID:              21,
+					IsActive:        true,
+					PriceAmount:     money.FromDecimal(decimal.RequireFromString("100.00")),
+					CostPriceAmount: money.FromDecimal(decimal.RequireFromString("120.00")),
+				},
+			},
+		}
+		item, err := h.decoratePublicProduct(product, nil, 1)
+		if err != nil {
+			t.Fatalf("decoratePublicProduct failed: %v", err)
+		}
+		if !item.MemberPriceResolved {
+			t.Fatalf("expected MemberPriceResolved=true")
+		}
+		if item.MemberPriceAmount != nil || item.SKUs[0].MemberPriceAmount != nil {
+			t.Fatalf("expected no member discount when cost >= price, got product=%+v sku=%+v", item.MemberPriceAmount, item.SKUs[0].MemberPriceAmount)
+		}
+	})
+
+	t.Run("promotion stacks before member discount and respects cost floor", func(t *testing.T) {
+		// 原价 300，促销价 220，成本 200，5 折理论 110 -> 托底到 200（严格低于促销价 220）
+		product := &productdomain.Product{
+			ID:              3,
+			PriceAmount:     money.FromDecimal(decimal.RequireFromString("300.00")),
+			CostPriceAmount: money.FromDecimal(decimal.RequireFromString("200.00")),
+			SKUs: []productdomain.ProductSKU{
+				{
+					ID:              31,
+					IsActive:        true,
+					PriceAmount:     money.FromDecimal(decimal.RequireFromString("300.00")),
+					CostPriceAmount: money.FromDecimal(decimal.RequireFromString("200.00")),
+				},
+			},
+		}
+		item, err := h.decoratePublicProduct(product, stubPromotionDecorator{promoPrice: decimal.RequireFromString("220.00")}, 1)
+		if err != nil {
+			t.Fatalf("decoratePublicProduct failed: %v", err)
+		}
+		expected := decimal.RequireFromString("200.00")
+		if item.SKUs[0].MemberPriceAmount == nil || !item.SKUs[0].MemberPriceAmount.Decimal.Equal(expected) {
+			t.Fatalf("expected sku MemberPriceAmount %s, got %+v", expected.String(), item.SKUs[0].MemberPriceAmount)
+		}
+	})
 }

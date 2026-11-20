@@ -421,6 +421,63 @@ func UserJWTAuthMiddleware(secretKey string, userRepo usercontract.Store) gin.Ha
 	}
 }
 
+// OptionalUserJWTAuthMiddleware 可选用户 JWT 鉴权中间件（用于公开商品目录识别当前登录用户实时会员等级，不阻断游客访问）。
+func OptionalUserJWTAuthMiddleware(secretKey string, userRepo usercontract.Store) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if secretKey == "" || userRepo == nil {
+			c.Next()
+			return
+		}
+		authHeader := c.GetHeader(authHeaderKey)
+		if authHeader == "" {
+			c.Next()
+			return
+		}
+
+		parts := strings.SplitN(authHeader, " ", 2)
+		if !(len(parts) == 2 && parts[0] == authSchemeBearer) {
+			c.Next()
+			return
+		}
+
+		tokenString := parts[1]
+		parser := newHS256JWTParser()
+		claims := &userauthapp.UserJWTClaims{}
+		token, err := parser.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+			return []byte(secretKey), nil
+		})
+		if err != nil || !token.Valid || claims.UserID == 0 {
+			c.Next()
+			return
+		}
+		if !jwttoken.IsAccessType(claims.Typ) {
+			c.Next()
+			return
+		}
+		// 令牌只在签发时所在的站点有效（主站 rid=0）
+		if claims.ResellerID != resellercontract.RequestResellerID(c.Request.Context()) {
+			c.Next()
+			return
+		}
+
+		// 直接读取实时用户记录，避免 Redis 鉴权快照中的等级变更滞后
+		user, err := userRepo.GetByID(claims.UserID)
+		if err != nil || user == nil || !isActiveUserStatus(user.Status) {
+			c.Next()
+			return
+		}
+		if claims.TokenVersion != user.TokenVersion || !isIssuedAfterInvalidBefore(claims.IssuedAt, user.TokenInvalidBefore) {
+			c.Next()
+			return
+		}
+
+		c.Set("user_id", claims.UserID)
+		c.Set("user_email", claims.Email)
+		c.Set("user_member_level_id", user.MemberLevelID)
+		c.Next()
+	}
+}
+
 func isIssuedAfterInvalidBefore(issuedAt *jwt.NumericDate, invalidBefore *time.Time) bool {
 	if invalidBefore == nil {
 		return true

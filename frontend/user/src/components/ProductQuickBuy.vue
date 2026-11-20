@@ -432,8 +432,11 @@ const currentMemberDiscountRate = computed(() => {
   return Number(level?.discount_rate || 0)
 })
 
-const ensureMemberLevels = () => {
+const ensureMemberLevels = async () => {
   void userProfileStore.loadMyProductPrices()
+  if (userAuthStore.isAuthenticated && !userMemberLevelId.value) {
+    await userProfileStore.loadProfile()
+  }
   if (userMemberLevelId.value > 0 && userProfileStore.memberLevels.length === 0) {
     void userProfileStore.loadMemberLevels()
   }

@@ -254,3 +254,142 @@ func TestPreviewOrderAPIPricingBySKUAgencyAndUserPrice(t *testing.T) {
 		t.Fatalf("expected api order without agency (qty=2) total 136 (wholesale 85 * 0.8 * 2), got %s", previewNoAgencyTwo.TotalAmount)
 	}
 }
+
+func TestOrderPricing_MemberLevelCostPriceFloor(t *testing.T) {
+	db := openAPIPricingTestDB(t)
+	now := time.Now()
+
+	category := categorydomain.Category{
+		Slug:      "member-floor-cat",
+		NameJSON:  jsonmap.JSON{"zh-CN": "测试分类"},
+		SortOrder: 0,
+		CreatedAt: now,
+	}
+	if err := db.Create(&category).Error; err != nil {
+		t.Fatalf("create category failed: %v", err)
+	}
+
+	// 5 折会员等级
+	level := memberleveldomain.MemberLevel{
+		NameJSON:     jsonmap.JSON{"zh-CN": "五折VIP"},
+		Slug:         "vip-50",
+		DiscountRate: money.FromDecimal(decimal.NewFromInt(50)),
+		IsActive:     true,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if err := db.Create(&level).Error; err != nil {
+		t.Fatalf("create level failed: %v", err)
+	}
+
+	vipUser := userdomain.User{
+		Email:         "vip50@example.com",
+		PasswordHash:  "hash",
+		Status:        "active",
+		MemberLevelID: level.ID,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	exclusiveUser := userdomain.User{
+		Email:         "vip50-exclusive@example.com",
+		PasswordHash:  "hash",
+		Status:        "active",
+		MemberLevelID: level.ID,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	for _, u := range []*userdomain.User{&vipUser, &exclusiveUser} {
+		if err := db.Create(u).Error; err != nil {
+			t.Fatalf("create user failed: %v", err)
+		}
+	}
+
+	// 商品售价 300，成本价 200
+	product := productdomain.Product{
+		CategoryID:       category.ID,
+		Slug:             "member-floor-product",
+		TitleJSON:        jsonmap.JSON{"zh-CN": "防击穿成本测试商品"},
+		PriceAmount:      money.FromDecimal(decimal.NewFromInt(300)),
+		CostPriceAmount:  money.FromDecimal(decimal.NewFromInt(200)),
+		PurchaseType:     constants.ProductPurchaseMember,
+		FulfillmentType:  constants.FulfillmentTypeManual,
+		ManualStockTotal: 10,
+		IsActive:         true,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	if err := db.Create(&product).Error; err != nil {
+		t.Fatalf("create product failed: %v", err)
+	}
+
+	sku := productdomain.ProductSKU{
+		ProductID:        product.ID,
+		SKUCode:          "FLOOR-SKU-1",
+		PriceAmount:      money.FromDecimal(decimal.NewFromInt(300)),
+		CostPriceAmount:  money.FromDecimal(decimal.NewFromInt(200)),
+		ManualStockTotal: 10,
+		IsActive:         true,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	if err := db.Create(&sku).Error; err != nil {
+		t.Fatalf("create sku failed: %v", err)
+	}
+
+	// 给 exclusiveUser 单独配置低于成本价的用户专属一口价 180
+	if err := db.Create(&memberleveldomain.UserProductPrice{
+		UserID:      exclusiveUser.ID,
+		ProductID:   product.ID,
+		SKUID:       sku.ID,
+		PriceAmount: money.FromDecimal(decimal.NewFromInt(180)),
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}).Error; err != nil {
+		t.Fatalf("create user exclusive price failed: %v", err)
+	}
+
+	levelRepo := memberlevelgormstore.NewLevelStore(db)
+	priceRepo := memberlevelgormstore.NewPriceStore(db)
+	userPriceRepo := memberlevelgormstore.NewUserPriceStore(db)
+	userRepo := userstore.New(db)
+	memberSvc := memberlevelapp.NewService(levelRepo, priceRepo, memberlevelgormstore.NewUserStore(db), userPriceRepo)
+
+	svc := NewOrderService(OrderServiceOptions{
+		UserStore:          userRepo,
+		ProductStore:       productgormstore.NewProductStore(db),
+		ProductSKUStore:    productgormstore.NewSKUStore(db),
+		PromotionRepo:      promotiongormstore.New(db),
+		MemberLevelService: memberSvc,
+		ExpireMinutes:      15,
+	})
+
+	// 1. 普通 5 折会员：300 × 0.5 = 150 < 成本 200，受成本价托底应实付 200，会员优惠 100
+	preview, err := svc.PreviewOrder(CreateOrderInput{
+		UserID: vipUser.ID,
+		Items:  []CreateOrderItem{{ProductID: product.ID, SKUID: sku.ID, Quantity: 1}},
+	})
+	if err != nil {
+		t.Fatalf("preview order failed: %v", err)
+	}
+	if !preview.TotalAmount.Decimal.Equal(decimal.NewFromInt(200)) {
+		t.Fatalf("expected actual amount 200, got %s", preview.TotalAmount.Decimal)
+	}
+	if !preview.MemberDiscountAmount.Decimal.Equal(decimal.NewFromInt(100)) {
+		t.Fatalf("expected member discount 100, got %s", preview.MemberDiscountAmount.Decimal)
+	}
+
+	// 2. 带用户专属一口价 180 的会员：专属价不受成本价托底限制，应实付 180，优惠 120
+	previewExclusive, err := svc.PreviewOrder(CreateOrderInput{
+		UserID: exclusiveUser.ID,
+		Items:  []CreateOrderItem{{ProductID: product.ID, SKUID: sku.ID, Quantity: 1}},
+	})
+	if err != nil {
+		t.Fatalf("preview order with exclusive price failed: %v", err)
+	}
+	if !previewExclusive.TotalAmount.Decimal.Equal(decimal.NewFromInt(180)) {
+		t.Fatalf("expected exclusive actual amount 180, got %s", previewExclusive.TotalAmount.Decimal)
+	}
+	if !previewExclusive.MemberDiscountAmount.Decimal.Equal(decimal.NewFromInt(120)) {
+		t.Fatalf("expected exclusive member discount 120, got %s", previewExclusive.MemberDiscountAmount.Decimal)
+	}
+}

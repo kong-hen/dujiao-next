@@ -121,3 +121,45 @@ test('无效输入返回 null', () => {
   assert.equal(resolveUserPriceCents(product, 19, []), null)
   assert.equal(resolveUserPriceCents(product, 19, undefined), null)
 })
+
+test('后端已解析成本价托底时，前台展示与卡片价遵循托底结果且专属价不受限制', () => {
+  // 售价 300，成本 200，5 折会员后端托底返回 200.00
+  const flooredProduct = {
+    id: 30,
+    price_amount: '300.00',
+    member_price_amount: '200.00',
+    member_price_resolved: true,
+    skus: [
+      { id: 31, price_amount: '300.00', member_price_amount: '200.00', is_active: true },
+    ],
+  }
+  // 详情页按原价 300 计算：直接采纳后端托底价 200.00，不按 5 折算成 150.00
+  assert.equal(resolveMemberPriceAmount(flooredProduct, 31, '300.00', 3, 50, []), '200.00')
+  // 商品卡片展示价同样为 200.00
+  assert.equal(resolveCardDisplayPrice(flooredProduct, 3, 50, []), '200.00')
+  // 用户专属一口价 180 不受成本价托底限制，更低则展示 180.00
+  const exclusive = [{ product_id: 30, sku_id: 31, price_amount: '180.00' }]
+  assert.equal(resolveMemberPriceAmount(flooredProduct, 31, '300.00', 3, 50, exclusive), '180.00')
+  assert.equal(resolveCardDisplayPrice(flooredProduct, 3, 50, exclusive), '180.00')
+  // 命中批发价 250（高于推导成本 200）：5 折理论 125 仍托底到 200.00
+  assert.equal(resolveMemberPriceAmount(flooredProduct, 31, '250.00', 3, 50, []), '200.00')
+  // 命中批发价 180（不高于推导成本 200）：不再叠加会员折扣
+  assert.equal(resolveMemberPriceAmount(flooredProduct, 31, '180.00', 3, 50, []), null)
+})
+
+test('成本价不低于售价时后端不返回会员价，前端不再回退本地折扣击穿成本', () => {
+  const noDiscountProduct = {
+    id: 32,
+    price_amount: '100.00',
+    member_price_resolved: true,
+    skus: [
+      { id: 33, price_amount: '100.00', is_active: true },
+    ],
+  }
+  assert.equal(resolveMemberPriceAmount(noDiscountProduct, 33, '100.00', 3, 50, []), null)
+  assert.equal(resolveMemberPriceAmount(noDiscountProduct, 33, '90.00', 3, 50, []), null)
+  assert.equal(resolveCardDisplayPrice(noDiscountProduct, 3, 50, []), null)
+  // 若管理员单独配置了用户专属价 85，则仍按专属价生效
+  const exclusive = [{ product_id: 32, sku_id: 33, price_amount: '85.00' }]
+  assert.equal(resolveMemberPriceAmount(noDiscountProduct, 33, '100.00', 3, 50, exclusive), '85.00')
+})

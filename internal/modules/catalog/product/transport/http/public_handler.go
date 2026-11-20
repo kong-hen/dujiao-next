@@ -49,7 +49,7 @@ type ProductPromotionDecorator interface {
 // MemberLevelPricing 是公开商品会员价装饰端口。
 type MemberLevelPricing interface {
 	GetLevelPricesByProduct(productID uint) ([]memberleveldomain.MemberLevelPrice, error)
-	ResolveMemberPrice(levelID, productID, skuID uint, basePrice decimal.Decimal) (decimal.Decimal, decimal.Decimal)
+	ResolveMemberPrice(levelID, productID, skuID uint, basePrice decimal.Decimal, costPrice ...decimal.Decimal) (decimal.Decimal, decimal.Decimal)
 }
 
 // LocalProductMappingReader 按本地商品 ID 读取上游映射。
@@ -136,9 +136,10 @@ func (h *PublicHandler) GetProducts(c *gin.Context) {
 		}
 	}
 
+	userMemberLevelID := ginutil.GetContextMemberLevelID(c)
 	decorated := make([]productpresenter.Product, 0, len(products))
 	for i := range products {
-		item, derr := h.decoratePublicProductForTenant(&products[i], h.promotions, tenant, resellerBatch)
+		item, derr := h.decoratePublicProductForTenant(&products[i], h.promotions, tenant, resellerBatch, userMemberLevelID)
 		if derr != nil {
 			if errors.Is(derr, productcontract.ErrResellerProductNotListed) {
 				continue
@@ -188,7 +189,8 @@ func (h *PublicHandler) GetProductBySlug(c *gin.Context) {
 		}
 	}
 
-	decorated, derr := h.decoratePublicProductForTenant(product, h.promotions, tenant, resellerBatch)
+	userMemberLevelID := ginutil.GetContextMemberLevelID(c)
+	decorated, derr := h.decoratePublicProductForTenant(product, h.promotions, tenant, resellerBatch, userMemberLevelID)
 	if derr != nil {
 		if errors.Is(derr, productcontract.ErrResellerProductNotListed) {
 			ginutil.RespondError(c, response.CodeNotFound, "error.product_not_found", nil)

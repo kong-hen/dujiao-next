@@ -129,10 +129,30 @@ func (s *Service) DeleteLevelPrice(id uint) error {
 
 // ResolveMemberPrice 解析会员价
 // 优先级：SKU级覆盖 > 商品级覆盖 > 等级折扣率 * basePrice
-// 返回会员价和会员优惠金额
-func (s *Service) ResolveMemberPrice(levelID, productID, skuID uint, basePrice decimal.Decimal) (memberPrice decimal.Decimal, memberDiscount decimal.Decimal) {
+// 支持成本底价托底：当提供 costPrice 且 > 0 时，会员等级价不得低于成本价（仅作用于会员等级价）。
+func (s *Service) ResolveMemberPrice(levelID, productID, skuID uint, basePrice decimal.Decimal, costPrice ...decimal.Decimal) (memberPrice decimal.Decimal, memberDiscount decimal.Decimal) {
 	if levelID == 0 {
 		return basePrice, decimal.Zero
+	}
+
+	floor := decimal.Zero
+	if len(costPrice) > 0 && costPrice[0].GreaterThan(decimal.Zero) {
+		floor = costPrice[0].Round(2)
+	}
+
+	applyFloor := func(mp decimal.Decimal) (decimal.Decimal, decimal.Decimal) {
+		if mp.GreaterThanOrEqual(basePrice) {
+			return basePrice, decimal.Zero
+		}
+		if floor.GreaterThan(decimal.Zero) && mp.LessThan(floor) {
+			if basePrice.GreaterThan(floor) {
+				mp = floor
+			} else {
+				// 原价/折前价本身不高于成本价时，不再继续打折
+				return basePrice, decimal.Zero
+			}
+		}
+		return mp, basePrice.Sub(mp).Round(2)
 	}
 
 	// 检查会员等级是否启用，停用的等级不享受任何优惠
@@ -146,10 +166,7 @@ func (s *Service) ResolveMemberPrice(levelID, productID, skuID uint, basePrice d
 		skuPrice, err := s.priceRepo.GetByLevelAndProductAndSKU(levelID, productID, skuID)
 		if err == nil && skuPrice != nil && skuPrice.PriceAmount.Decimal.GreaterThan(decimal.Zero) {
 			mp := skuPrice.PriceAmount.Decimal.Round(2)
-			if mp.LessThan(basePrice) {
-				return mp, basePrice.Sub(mp).Round(2)
-			}
-			return basePrice, decimal.Zero
+			return applyFloor(mp)
 		}
 	}
 
@@ -157,10 +174,7 @@ func (s *Service) ResolveMemberPrice(levelID, productID, skuID uint, basePrice d
 	productPrice, err := s.priceRepo.GetByLevelAndProductAndSKU(levelID, productID, 0)
 	if err == nil && productPrice != nil && productPrice.PriceAmount.Decimal.GreaterThan(decimal.Zero) {
 		mp := productPrice.PriceAmount.Decimal.Round(2)
-		if mp.LessThan(basePrice) {
-			return mp, basePrice.Sub(mp).Round(2)
-		}
-		return basePrice, decimal.Zero
+		return applyFloor(mp)
 	}
 
 	// 使用等级折扣率
@@ -169,29 +183,27 @@ func (s *Service) ResolveMemberPrice(levelID, productID, skuID uint, basePrice d
 		return basePrice, decimal.Zero
 	}
 	mp := basePrice.Mul(rate).Div(decimal.NewFromInt(100)).Round(2)
-	if mp.LessThan(basePrice) {
-		return mp, basePrice.Sub(mp).Round(2)
-	}
-	return basePrice, decimal.Zero
+	return applyFloor(mp)
 }
 
 // ResolveCatalogPrice 解析目录展示价，口径与下单完全一致。
 //
-// 下单流程里活动价 → 批发价 → 会员等级价依次生效，最后才拿专属价去比较；专属价必须
+// 下单流程里活动价 → 批发价 → 会员等级价（含成本价托底）依次生效，最后才拿专属价去比较；专属价必须
 // 比这条路径的最终价更低才有意义。目录只有基础价可用（没有数量、也拿不到批发阶梯的
 // 命中情况），所以这里比的是"基础价 vs 专属价 vs 会员价"，取更低的那个：
-//   - 专属价低于会员价 → 展示专属价，调用方隐藏活动价（一口价不与活动叠加）；
-//   - 会员价更低 → 展示会员价；
+//   - 专属价低于会员价 → 展示专属价（管理员手工特批一口价不受成本价托底限制），调用方隐藏活动价；
+//   - 会员价更低 → 展示会员价（受 costPrice 成本价托底保护）；
 //   - 都不低于基础价 → 不命中。
 //
 // 上游对接目录和渠道目录都调这一份，避免两边各写一遍后慢慢跑偏。
 func (s *Service) ResolveCatalogPrice(
 	book UserPriceBook, levelID, productID, skuID uint,
 	base decimal.Decimal,
+	costPrice ...decimal.Decimal,
 ) (price decimal.Decimal, hit bool, exclusive bool) {
 	best := base
 	if levelID > 0 {
-		if memberPrice, _ := s.ResolveMemberPrice(levelID, productID, skuID, base); memberPrice.LessThan(best) {
+		if memberPrice, _ := s.ResolveMemberPrice(levelID, productID, skuID, base, costPrice...); memberPrice.LessThan(best) {
 			best, hit = memberPrice, true
 		}
 	}
